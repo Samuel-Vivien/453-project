@@ -10,7 +10,12 @@ Single-window desktop calendar built with Python + Tkinter.
 - Stores data in `calendar_items.json` in the project directory
 - No popup dialogs required for item view/edit flows
 
-## Run
+## Install (One Click)
+
+1. Double-click `Install Calendar App.bat`.
+2. After installation finishes, double-click `Run Calendar App.bat`.
+
+## Run (Manual)
 
 ```powershell
 py -3 -m pip install -r requirements.txt
