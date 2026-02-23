@@ -17,6 +17,8 @@ from tkinter import ttk
 import webbrowser
 from typing import Dict, List, Optional
 
+from moodle_crawler import MoodleCrawler, MoodleEvent
+
 
 DATA_FILE = Path(__file__).with_name("calendar_items.json")
 URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>\"']+)")
@@ -57,6 +59,7 @@ class CalendarApp(tk.Tk):
         self.selected_date = today
         self.next_item_id = 1
         self.items_by_day: Dict[str, List[CalendarItem]] = {}
+        self.moodle_crawler = MoodleCrawler()
         self._url_tag_to_link: Dict[str, str] = {}
 
         self.style = ttk.Style(self)
@@ -171,6 +174,39 @@ class CalendarApp(tk.Tk):
         self.delete_button.grid(row=0, column=2, sticky="ew", padx=3)
         self.clear_button = ttk.Button(action_frame, text="Clear", command=self._clear_editor)
         self.clear_button.grid(row=0, column=3, sticky="ew", padx=(3, 0))
+
+        moodle_frame = ttk.LabelFrame(side_panel, text="Moodle Import", padding=8)
+        moodle_frame.grid(row=3, column=0, sticky="ew")
+        moodle_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(moodle_frame, text="Site URL").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.moodle_url_var = tk.StringVar()
+        ttk.Entry(moodle_frame, textvariable=self.moodle_url_var).grid(row=0, column=1, sticky="ew", pady=(0, 4))
+
+        ttk.Label(moodle_frame, text="Username").grid(row=1, column=0, sticky="w", pady=(0, 4))
+        self.moodle_username_var = tk.StringVar()
+        self.moodle_username_entry = ttk.Entry(moodle_frame, textvariable=self.moodle_username_var)
+        self.moodle_username_entry.grid(row=1, column=1, sticky="ew", pady=(0, 4))
+
+        ttk.Label(moodle_frame, text="Password").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        self.moodle_password_var = tk.StringVar()
+        ttk.Entry(moodle_frame, textvariable=self.moodle_password_var, show="*").grid(
+            row=2, column=1, sticky="ew", pady=(0, 4)
+        )
+
+        ttk.Button(moodle_frame, text="Import Moodle Dates", command=self._import_moodle_dates).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
+        )
+
+        self.moodle_info_var = tk.StringVar(
+            value="Imports homework, quiz, and test dates from Moodle text content."
+        )
+        ttk.Label(
+            moodle_frame,
+            textvariable=self.moodle_info_var,
+            wraplength=320,
+            style="Muted.TLabel",
+        ).grid(row=4, column=0, columnspan=2, sticky="w")
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self, textvariable=self.status_var, relief="groove", anchor="w", padding=6).grid(
@@ -406,6 +442,92 @@ class CalendarApp(tk.Tk):
             self._set_status(f"Opened {target_link}")
         else:
             self._set_status(f"Could not open {target_link}")
+
+    def _import_moodle_dates(self) -> None:
+        """Crawls Moodle pages and imports dated class items into the calendar."""
+        moodle_url = self.moodle_url_var.get().strip()
+        if not moodle_url:
+            self._set_status("Enter a Moodle URL before importing.")
+            return
+
+        username = self.moodle_username_var.get().strip()
+        password = self.moodle_password_var.get()
+        self._set_status("Reading Moodle pages...")
+        self.update_idletasks()
+
+        events, login_required, message = self.moodle_crawler.crawl(
+            moodle_url,
+            username=username,
+            password=password,
+        )
+
+        if login_required:
+            self.moodle_info_var.set(message)
+            self._set_status(message)
+            self.moodle_username_entry.focus_set()
+            return
+
+        if not events:
+            self.moodle_info_var.set(message)
+            self._set_status(message)
+            return
+
+        added_count, skipped_count = self._store_moodle_events(events)
+        self._refresh_calendar()
+        self._refresh_item_list()
+        self.moodle_info_var.set(message)
+        self._set_status(f"Imported {added_count} Moodle items. Skipped {skipped_count} duplicates.")
+
+    def _store_moodle_events(self, events: List[MoodleEvent]) -> tuple[int, int]:
+        """Adds parsed Moodle events to calendar storage while avoiding duplicates."""
+        existing_signatures = set()
+        for day_key, day_items in self.items_by_day.items():
+            for item in day_items:
+                existing_signatures.add(
+                    (
+                        day_key,
+                        item.title.strip().lower(),
+                        item.time_label.strip().lower(),
+                    )
+                )
+
+        added_count = 0
+        skipped_count = 0
+        for event in events:
+            date_key = event.event_date.isoformat()
+            title = event.title.strip() or f"{event.category} item"
+            if event.category.lower() not in title.lower():
+                title = f"{event.category}: {title}"
+
+            normalized_signature = (
+                date_key,
+                title.strip().lower(),
+                event.time_label.strip().lower(),
+            )
+            if normalized_signature in existing_signatures:
+                skipped_count += 1
+                continue
+
+            details_parts = [event.details.strip()]
+            if event.source_url and event.source_url not in event.details:
+                details_parts.append(f"Source: {event.source_url}")
+            details_text = "\n".join(part for part in details_parts if part).strip()
+
+            self.items_by_day.setdefault(date_key, []).append(
+                CalendarItem(
+                    item_id=self.next_item_id,
+                    title=title,
+                    details=details_text,
+                    time_label=event.time_label.strip(),
+                )
+            )
+            self.next_item_id += 1
+            existing_signatures.add(normalized_signature)
+            added_count += 1
+
+        if added_count:
+            self._save_items()
+        return added_count, skipped_count
 
     def _selected_index(self) -> Optional[int]:
         """Returns the currently selected listbox index, if any."""
