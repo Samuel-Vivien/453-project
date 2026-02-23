@@ -11,12 +11,15 @@ from datetime import date
 import calendar
 import json
 from pathlib import Path
+import re
 import tkinter as tk
 from tkinter import ttk
+import webbrowser
 from typing import Dict, List, Optional
 
 
 DATA_FILE = Path(__file__).with_name("calendar_items.json")
+URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>\"']+)")
 
 
 @dataclass
@@ -54,6 +57,7 @@ class CalendarApp(tk.Tk):
         self.selected_date = today
         self.next_item_id = 1
         self.items_by_day: Dict[str, List[CalendarItem]] = {}
+        self._url_tag_to_link: Dict[str, str] = {}
 
         self.style = ttk.Style(self)
         self.style.configure("SelectedDay.TButton", foreground="#0a4f9c")
@@ -152,6 +156,7 @@ class CalendarApp(tk.Tk):
         ttk.Label(editor_frame, text="Details").grid(row=2, column=0, sticky="nw", pady=(0, 4))
         self.details_text = tk.Text(editor_frame, height=6, wrap="word")
         self.details_text.grid(row=2, column=1, sticky="nsew", pady=(0, 4))
+        self.details_text.bind("<KeyRelease>", self._on_details_changed)
         editor_frame.rowconfigure(2, weight=1)
 
         action_frame = ttk.Frame(editor_frame)
@@ -193,7 +198,7 @@ class CalendarApp(tk.Tk):
         self._refresh_calendar()
 
     def _refresh_calendar(self) -> None:
-        """Renders the monthly grid and updates day button text/count badges."""
+        """Renders the monthly grid using only real dates for the active month view."""
         self.month_label.config(text=f"{calendar.month_name[self.current_month]} {self.current_year}")
         if self.selected_date.month != self.current_month or self.selected_date.year != self.current_year:
             # Keep selection valid when navigating months by snapping to the first day.
@@ -201,15 +206,24 @@ class CalendarApp(tk.Tk):
 
         weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(self.current_year, self.current_month)
         flat_days = [day for week in weeks for day in week]
-        while len(flat_days) < 42:
-            flat_days.append(flat_days[-1])
+        visible_rows = len(weeks)
+        for row in range(6):
+            # Hidden rows receive zero weight so no extra empty row is shown.
+            self.calendar_grid.rowconfigure(row, weight=1 if row < visible_rows else 0)
 
-        for idx, day in enumerate(flat_days[:42]):
+        for idx, btn in enumerate(self.day_buttons):
+            if idx >= len(flat_days):
+                self._button_dates[idx] = None
+                btn.config(text="", state="disabled", style="NormalDay.TButton")
+                btn.grid_remove()
+                continue
+
+            btn.grid()
+            day = flat_days[idx]
             self._button_dates[idx] = day if day.month == self.current_month else None
-            btn = self.day_buttons[idx]
 
             if day.month != self.current_month:
-                btn.config(text="", state="disabled")
+                btn.config(text="", state="disabled", style="NormalDay.TButton")
                 continue
 
             count = len(self.items_by_day.get(self._date_key(day), []))
@@ -253,6 +267,7 @@ class CalendarApp(tk.Tk):
         self.time_var.set(selected_item.time_label)
         self.details_text.delete("1.0", tk.END)
         self.details_text.insert("1.0", selected_item.details)
+        self._refresh_details_links()
         self._set_status(f"Loaded item #{selected_item.item_id} into editor")
 
     def _add_item(self) -> None:
@@ -330,8 +345,67 @@ class CalendarApp(tk.Tk):
         self.title_var.set("")
         self.time_var.set("")
         self.details_text.delete("1.0", tk.END)
+        self._refresh_details_links()
         if not keep_status:
             self._set_status("Editor cleared")
+
+    def _on_details_changed(self, _event: object) -> None:
+        """Schedules URL tagging after text edits complete."""
+        self.after_idle(self._refresh_details_links)
+
+    def _refresh_details_links(self) -> None:
+        """Detects URLs in the details field and decorates them as clickable links."""
+        for tag_name in list(self._url_tag_to_link):
+            self.details_text.tag_delete(tag_name)
+        self._url_tag_to_link.clear()
+
+        details_value = self.details_text.get("1.0", "end-1c")
+        for match in URL_PATTERN.finditer(details_value):
+            raw_link = match.group(1)
+            clean_link = raw_link.rstrip(".,;:!?)]}")
+            if not clean_link:
+                continue
+
+            start_offset = match.start(1)
+            end_offset = start_offset + len(clean_link)
+            tag_name = f"url_{start_offset}_{end_offset}"
+            start_index = f"1.0+{start_offset}c"
+            end_index = f"1.0+{end_offset}c"
+
+            self._url_tag_to_link[tag_name] = clean_link
+            self.details_text.tag_add(tag_name, start_index, end_index)
+            self.details_text.tag_configure(tag_name, foreground="#0a4f9c", underline=True)
+            self.details_text.tag_bind(
+                tag_name,
+                "<Button-1>",
+                lambda _event, link=clean_link: self._open_link(link),
+            )
+            self.details_text.tag_bind(
+                tag_name,
+                "<Enter>",
+                lambda _event: self.details_text.config(cursor="hand2"),
+            )
+            self.details_text.tag_bind(
+                tag_name,
+                "<Leave>",
+                lambda _event: self.details_text.config(cursor="xterm"),
+            )
+
+    def _open_link(self, raw_link: str) -> None:
+        """Opens a detected details URL in the user's default web browser."""
+        target_link = raw_link
+        if not raw_link.lower().startswith(("http://", "https://")):
+            target_link = f"https://{raw_link}"
+
+        try:
+            opened = webbrowser.open(target_link, new=2)
+        except webbrowser.Error:
+            opened = False
+
+        if opened:
+            self._set_status(f"Opened {target_link}")
+        else:
+            self._set_status(f"Could not open {target_link}")
 
     def _selected_index(self) -> Optional[int]:
         """Returns the currently selected listbox index, if any."""
