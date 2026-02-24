@@ -35,6 +35,17 @@ class _AnchorLink:
     text: str
 
 
+@dataclass
+class _AssignmentPageInfo:
+    """Represents key metadata parsed from one assignment page."""
+
+    url: str
+    title: str
+    due_date: Optional[date]
+    due_time: str
+    class_label: str
+
+
 class _VisibleTextParser(HTMLParser):
     """Extracts readable text while skipping scripts/styles."""
 
@@ -256,6 +267,8 @@ class MoodleCrawler:
         "test",
         "exam",
         "done",
+        "mark",
+        "as",
         "view",
         "receive",
         "grade",
@@ -282,7 +295,7 @@ class MoodleCrawler:
     _MAX_PAST_DAYS = 365
     _MAX_FUTURE_DAYS = 730
 
-    def __init__(self, max_pages: int = 18, timeout_seconds: int = 15) -> None:
+    def __init__(self, max_pages: int = 60, timeout_seconds: int = 15) -> None:
         self.max_pages = max_pages
         self.timeout_seconds = timeout_seconds
 
@@ -325,9 +338,10 @@ class MoodleCrawler:
                 return [], True, "Login did not succeed. Verify credentials and Moodle URL."
 
         pages = self._collect_pages(opener, normalized_url, first_html)
+        assignment_index = self._build_assignment_index(pages)
         events: List[MoodleEvent] = []
         for page_url, html in pages:
-            events.extend(self._extract_events_from_page(page_url, html))
+            events.extend(self._extract_events_from_page(page_url, html, assignment_index))
 
         deduped = self._dedupe_events(events)
         deduped = self._filter_event_date_window(deduped)
@@ -367,8 +381,9 @@ class MoodleCrawler:
                 pass
 
         events: List[MoodleEvent] = []
+        assignment_index = self._build_assignment_index(pages)
         for page_url, html in pages:
-            events.extend(self._extract_events_from_page(page_url, html))
+            events.extend(self._extract_events_from_page(page_url, html, assignment_index))
         deduped = self._dedupe_events(events)
         deduped = self._filter_event_date_window(deduped)
         if not deduped:
@@ -788,14 +803,46 @@ class MoodleCrawler:
                 continue
             seen.add(canonical)
             unique_links.append(link)
+        unique_links.sort(key=self._crawl_link_priority)
         return unique_links
 
-    def _extract_events_from_page(self, page_url: str, html: str) -> List[MoodleEvent]:
+    def _crawl_link_priority(self, link: str) -> Tuple[int, str]:
+        """Sort key to crawl likely event-bearing module pages before generic course pages."""
+        lowered = link.lower()
+        if "/mod/assign/" in lowered:
+            return (0, lowered)
+        if "/mod/quiz/" in lowered:
+            return (1, lowered)
+        if "/calendar/view.php" in lowered:
+            return (2, lowered)
+        if "/course/view.php" in lowered:
+            return (3, lowered)
+        if "/my/" in lowered:
+            return (4, lowered)
+        return (5, lowered)
+
+    def _extract_events_from_page(
+        self,
+        page_url: str,
+        html: str,
+        assignment_index: Optional[Dict[str, _AssignmentPageInfo]] = None,
+    ) -> List[MoodleEvent]:
         """Parses one Moodle page into structured date-based events."""
         plain_text = self._html_to_plain_text(html)
         lines = [self._normalize_whitespace(line) for line in plain_text.splitlines()]
         lines = [line for line in lines if line]
         page_links = self._extract_anchor_links(page_url, html)
+        class_label = self._extract_class_label(page_url, page_links, lines)
+        assignment_index = assignment_index or {}
+
+        if self._is_assignment_page_url(page_url):
+            assignment_event = self._extract_assignment_page_event(
+                page_url,
+                lines,
+                class_label,
+                assignment_index,
+            )
+            return [assignment_event] if assignment_event is not None else []
 
         events: List[MoodleEvent] = []
         seen_page_keys: Set[Tuple[str, str, str, str]] = set()
@@ -823,9 +870,46 @@ class MoodleCrawler:
                 continue
             event_date, time_label = parsed_date
 
-            title = self._derive_title(lines, index, category)
-            if not title:
-                title = f"{category} item"
+            if not self._is_relevant_schedule_context(category, parsed_context):
+                continue
+
+            raw_title = self._derive_title(lines, index, category)
+            if not raw_title:
+                raw_title = f"{category} item"
+            if category == "Homework" and self._is_low_confidence_homework_title(raw_title):
+                # Generic completion rows (for example "Mark as done") create bad link mappings.
+                continue
+
+            source_url = page_url
+            if category == "Homework":
+                source_url = self._resolve_homework_submission_url(
+                    page_url,
+                    page_links,
+                    raw_title,
+                    event_date,
+                    time_label,
+                    class_label,
+                    assignment_index,
+                )
+            elif category in {"Quiz", "Test"}:
+                source_url = self._resolve_quiz_test_url(
+                    page_url,
+                    page_links,
+                    raw_title,
+                    category,
+                    event_date,
+                    time_label,
+                    class_label,
+                    assignment_index,
+                )
+
+            title = raw_title
+            if category == "Homework":
+                resolved_class_label = class_label
+                info = assignment_index.get(self._canonical_url(self._to_submission_page_url(source_url)))
+                if info is not None and info.class_label:
+                    resolved_class_label = info.class_label
+                title = self._with_class_label(raw_title, resolved_class_label)
 
             event_key = (
                 event_date.isoformat(),
@@ -836,12 +920,6 @@ class MoodleCrawler:
             if event_key in seen_page_keys:
                 continue
             seen_page_keys.add(event_key)
-
-            source_url = page_url
-            if category == "Homework":
-                source_url = self._resolve_homework_submission_url(page_url, page_links, title)
-            elif category in {"Quiz", "Test"}:
-                source_url = self._resolve_quiz_test_url(page_url, page_links, title, category)
 
             details = f"{parsed_context}\nSource: {source_url}"
             events.append(
@@ -870,11 +948,310 @@ class MoodleCrawler:
             anchors.append(_AnchorLink(href=absolute, text=self._normalize_whitespace(anchor.text)))
         return anchors
 
+    def _build_assignment_index(self, pages: List[Tuple[str, str]]) -> Dict[str, _AssignmentPageInfo]:
+        """Builds an index of assignment pages keyed by canonical submission URL."""
+        index: Dict[str, _AssignmentPageInfo] = {}
+        for page_url, html in pages:
+            plain_text = self._html_to_plain_text(html)
+            lines = [self._normalize_whitespace(line) for line in plain_text.splitlines()]
+            lines = [line for line in lines if line]
+            anchors = self._extract_anchor_links(page_url, html)
+            class_label = self._extract_class_label(page_url, anchors, lines)
+
+            # Seed metadata from assignment links even when assignment pages are not crawled.
+            for anchor in anchors:
+                if not self._is_assignment_page_url(anchor.href):
+                    continue
+                normalized_anchor_url = self._to_submission_page_url(anchor.href)
+                key = self._canonical_url(normalized_anchor_url)
+                anchor_title = self._normalize_whitespace(anchor.text) or "Homework item"
+                existing = index.get(key)
+                if existing is None:
+                    index[key] = _AssignmentPageInfo(
+                        url=normalized_anchor_url,
+                        title=anchor_title,
+                        due_date=None,
+                        due_time="",
+                        class_label=class_label,
+                    )
+                else:
+                    if not existing.class_label and class_label:
+                        existing.class_label = class_label
+                    if (not existing.title or existing.title.lower().endswith("item")) and anchor_title:
+                        existing.title = anchor_title
+
+            if not self._is_assignment_page_url(page_url):
+                continue
+
+            due_date, due_time = self._extract_due_datetime_from_lines(lines)
+
+            title = ""
+            for line in lines:
+                if not line:
+                    continue
+                if self._looks_generic(line):
+                    continue
+                lowered = line.lower()
+                if any(token in lowered for token in ("dashboard", "my courses", "assignment", "submission status")):
+                    # Allow assignment headings like "Assignment 2", but avoid global navigation labels.
+                    if lowered.startswith("assignment "):
+                        title = line
+                        break
+                    continue
+                title = line
+                break
+            if not title:
+                title = "Homework item"
+
+            normalized_url = self._to_submission_page_url(page_url)
+            key = self._canonical_url(normalized_url)
+            existing = index.get(key)
+            if existing is None:
+                index[key] = _AssignmentPageInfo(
+                    url=normalized_url,
+                    title=title,
+                    due_date=due_date,
+                    due_time=due_time,
+                    class_label=class_label,
+                )
+            else:
+                existing.url = normalized_url
+                if title:
+                    existing.title = title
+                if due_date is not None:
+                    existing.due_date = due_date
+                if due_time:
+                    existing.due_time = due_time
+                if class_label:
+                    existing.class_label = class_label
+        return index
+
+    def _extract_due_datetime_from_lines(self, lines: List[str]) -> Tuple[Optional[date], str]:
+        """Finds the most likely due date/time from plain-text page lines."""
+        for idx, line in enumerate(lines):
+            lowered = line.lower()
+            if "due" not in lowered:
+                continue
+            parsed = self._extract_first_date(line)
+            if parsed is not None:
+                return parsed
+            if idx + 1 < len(lines):
+                parsed = self._extract_first_date(f"{line} {lines[idx + 1]}")
+                if parsed is not None:
+                    return parsed
+                parsed = self._extract_first_date(lines[idx + 1])
+                if parsed is not None:
+                    return parsed
+
+        for idx, line in enumerate(lines):
+            lowered = line.lower()
+            if "close" not in lowered and "deadline" not in lowered:
+                continue
+            parsed = self._extract_first_date(line)
+            if parsed is not None:
+                return parsed
+            if idx + 1 < len(lines):
+                parsed = self._extract_first_date(f"{line} {lines[idx + 1]}")
+                if parsed is not None:
+                    return parsed
+
+        for line in lines:
+            parsed = self._extract_first_date(line)
+            if parsed is not None:
+                return parsed
+        return None, ""
+
+    def _extract_class_label(self, page_url: str, anchors: List[_AnchorLink], lines: List[str]) -> str:
+        """Extracts a class/course label from breadcrumbs or course links."""
+        parsed_page = urlparse(page_url)
+        page_query = {key.lower(): value for key, value in parse_qsl(parsed_page.query, keep_blank_values=True)}
+        page_course_id = page_query.get("id", "").strip()
+        if page_course_id and "/course/view.php" in parsed_page.path.lower():
+            for anchor in anchors:
+                parsed_anchor = urlparse(anchor.href)
+                if "/course/view.php" not in parsed_anchor.path.lower():
+                    continue
+                anchor_query = {key.lower(): value for key, value in parse_qsl(parsed_anchor.query, keep_blank_values=True)}
+                if anchor_query.get("id", "").strip() != page_course_id:
+                    continue
+                text = self._normalize_whitespace(anchor.text)
+                lowered = text.lower()
+                if text and lowered not in {"dashboard", "home", "my courses", "courses", "course"}:
+                    return text
+
+        label_candidates: List[str] = []
+        for anchor in anchors:
+            if "/course/view.php" not in anchor.href.lower():
+                continue
+            text = self._normalize_whitespace(anchor.text)
+            lowered = text.lower()
+            if not text or lowered in {"dashboard", "home", "my courses", "courses", "course"}:
+                continue
+            label_candidates.append(text)
+
+        unique_labels = list(dict.fromkeys(label_candidates))
+        if len(unique_labels) == 1:
+            # Breadcrumb links are generally ordered from general to specific; use the most specific course label.
+            return unique_labels[0]
+        if len(unique_labels) > 1:
+            # Multiple course links on one page (e.g., dashboard) are ambiguous for per-event class labelling.
+            return ""
+
+        for line in lines[:20]:
+            match = re.search(r"\b[A-Z]{3,5}\s*[- ]\s*\d{3,4}\b", line)
+            if match:
+                return self._normalize_whitespace(match.group(0))
+            compact_match = re.search(r"\b[A-Z]{2,6}\d{3,4}(?:-\d{3})?(?:-\d{6})?\b", line)
+            if compact_match:
+                return self._normalize_whitespace(compact_match.group(0))
+
+        parsed = urlparse(page_url)
+        query_map = {key.lower(): value for key, value in parse_qsl(parsed.query, keep_blank_values=True)}
+        course_id = query_map.get("id", "").strip()
+        if course_id and "/course/view.php" in parsed.path.lower():
+            return f"Course {course_id}"
+        return ""
+
+    def _with_class_label(self, title: str, class_label: str) -> str:
+        """Prefixes the title with class context when not already present."""
+        if not class_label:
+            return title
+        lowered_title = title.lower()
+        lowered_label = class_label.lower()
+        if lowered_label in lowered_title:
+            return title
+        return f"[{class_label}] {title}"
+
+    def _extract_assignment_page_event(
+        self,
+        page_url: str,
+        lines: List[str],
+        page_class_label: str,
+        assignment_index: Dict[str, _AssignmentPageInfo],
+    ) -> Optional[MoodleEvent]:
+        """Parses one assignment page into a single due-date homework event."""
+        source_url = self._to_submission_page_url(page_url)
+        info = assignment_index.get(self._canonical_url(source_url))
+
+        due_context, parsed_due = self._extract_due_context_from_lines(lines)
+        due_date: Optional[date] = None
+        due_time = ""
+        if parsed_due is not None:
+            due_date, due_time = parsed_due
+        elif info is not None and info.due_date is not None:
+            due_date, due_time = info.due_date, info.due_time
+
+        if due_date is None:
+            return None
+
+        class_label = page_class_label
+        if info is not None and info.class_label:
+            class_label = info.class_label
+
+        base_title = ""
+        if info is not None:
+            base_title = info.title
+        base_title = self._clean_assignment_title(base_title, class_label)
+        if not base_title:
+            base_title = self._derive_title(lines, 0, "Homework")
+            base_title = self._clean_assignment_title(base_title, class_label)
+        if not base_title:
+            base_title = "Homework item"
+
+        if not class_label and info is not None:
+            class_label = self._infer_class_label_from_text(info.title)
+
+        title = self._with_class_label(base_title, class_label)
+        details_line = due_context or f"Due: {due_date.isoformat()} {due_time}".strip()
+        details = f"{details_line}\nSource: {source_url}"
+        return MoodleEvent(
+            title=title,
+            category="Homework",
+            event_date=due_date,
+            time_label=due_time,
+            details=details,
+            source_url=source_url,
+        )
+
+    def _extract_due_context_from_lines(self, lines: List[str]) -> Tuple[str, Optional[Tuple[date, str]]]:
+        """Returns the most relevant due/close context line and parsed date/time."""
+        for idx, line in enumerate(lines):
+            lowered = line.lower()
+            if not any(token in lowered for token in ("due", "closes", "closed", "deadline", "close:")):
+                continue
+            parsed = self._extract_first_date(line)
+            if parsed is not None:
+                return line, parsed
+            if idx + 1 < len(lines):
+                combined = f"{line} {lines[idx + 1]}".strip()
+                parsed = self._extract_first_date(combined)
+                if parsed is not None:
+                    return combined, parsed
+                parsed = self._extract_first_date(lines[idx + 1])
+                if parsed is not None:
+                    return lines[idx + 1], parsed
+        return "", None
+
+    def _clean_assignment_title(self, title: str, class_label: str) -> str:
+        """Normalizes assignment titles extracted from noisy page text."""
+        cleaned = self._normalize_whitespace(title)
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"(?i)^skip to main content\s*", "", cleaned).strip()
+        cleaned = re.sub(r"\s*\|\s*home.*$", "", cleaned, flags=re.IGNORECASE).strip()
+        if class_label and cleaned.lower().startswith(class_label.lower() + ":"):
+            cleaned = cleaned[len(class_label) + 1 :].strip()
+
+        if cleaned.lower() in {"overview", "completion requirements", "home"}:
+            return ""
+        return cleaned
+
+    def _infer_class_label_from_text(self, text: str) -> str:
+        """Infers course code from heading text when explicit class labels are unavailable."""
+        normalized = self._normalize_whitespace(text)
+        if not normalized:
+            return ""
+        match = re.match(r"^([A-Z]{2,6}\d{3,4}(?:-\d{3})?(?:-\d{6})?)", normalized)
+        if match:
+            return match.group(1)
+        return ""
+
+    def _is_relevant_schedule_context(self, category: str, text: str) -> bool:
+        """Keeps only date lines relevant to due/test/quiz scheduling."""
+        lowered = text.lower()
+        if category == "Homework":
+            return any(token in lowered for token in ("due", "closes", "closed", "deadline", "close:"))
+        if category == "Quiz":
+            return any(token in lowered for token in ("quiz", "due", "closes", "deadline", "exam", "test", "date"))
+        if category == "Test":
+            return any(token in lowered for token in ("test", "exam", "midterm", "final", "due", "date", "deadline"))
+        return True
+
+    def _is_low_confidence_homework_title(self, title: str) -> bool:
+        """Returns True when homework title text is too generic for reliable link matching."""
+        lowered = title.lower()
+        if self._looks_generic(title):
+            return True
+        return any(
+            token in lowered
+            for token in (
+                "mark as done",
+                "feedback",
+                "completion requirements",
+                "overview",
+                "done:view",
+            )
+        )
+
     def _resolve_homework_submission_url(
         self,
         page_url: str,
         anchors: List[_AnchorLink],
         event_title: str,
+        event_date: date,
+        event_time_label: str,
+        class_label: str,
+        assignment_index: Dict[str, _AssignmentPageInfo],
     ) -> str:
         """Chooses the best Moodle assignment submission URL for a homework event."""
         if self._is_assignment_page_url(page_url):
@@ -891,18 +1268,61 @@ class MoodleCrawler:
             return page_url
 
         title_tokens = self._tokenize_title(event_title)
-        if not title_tokens:
-            return self._to_submission_page_url(candidates[0].href)
 
-        best_score = -1
+        best_score = -10_000
         best_url = candidates[0].href
+        best_info: Optional[_AssignmentPageInfo] = None
+        best_has_due_mismatch = False
+        best_due_match_score = -10_000
+        best_due_match_url = ""
+        low_confidence_title = self._is_low_confidence_homework_title(event_title)
         for candidate in candidates:
+            normalized_candidate = self._to_submission_page_url(candidate.href)
+            score = 0
+            has_due_mismatch = False
+
             link_tokens = self._tokenize_title(candidate.text)
-            score = len(title_tokens.intersection(link_tokens))
+            score += len(title_tokens.intersection(link_tokens)) * 4
+
+            info = assignment_index.get(self._canonical_url(normalized_candidate))
+            if info is not None:
+                if info.due_date == event_date:
+                    score += 220
+                    if score > best_due_match_score:
+                        best_due_match_score = score
+                        best_due_match_url = normalized_candidate
+                elif info.due_date is not None:
+                    score -= 240
+                    has_due_mismatch = True
+                if event_time_label and info.due_time and info.due_time.lower() == event_time_label.lower():
+                    score += 25
+                elif event_time_label and info.due_time:
+                    score -= 20
+                info_tokens = self._tokenize_title(info.title)
+                score += len(title_tokens.intersection(info_tokens)) * 6
+                if class_label and info.class_label and class_label.lower() == info.class_label.lower():
+                    score += 20
+                elif class_label and info.class_label:
+                    score -= 30
+            elif "/mod/assign/view.php" in normalized_candidate.lower():
+                score += 2
+
             if score > best_score:
                 best_score = score
-                best_url = candidate.href
-        return self._to_submission_page_url(best_url)
+                best_url = normalized_candidate
+                best_info = info
+                best_has_due_mismatch = has_due_mismatch
+        if best_due_match_url:
+            return self._to_submission_page_url(best_due_match_url)
+        if low_confidence_title:
+            return page_url
+        if best_has_due_mismatch and best_info is not None and best_info.due_date is not None:
+            return page_url
+        if best_score >= 32:
+            return self._to_submission_page_url(best_url)
+
+        # Low-confidence generic rows should not be force-mapped to a random assignment.
+        return page_url
 
     def _is_assignment_page_url(self, url: str) -> bool:
         """Returns True for Moodle assignment URLs."""
@@ -973,6 +1393,10 @@ class MoodleCrawler:
         anchors: List[_AnchorLink],
         event_title: str,
         category: str,
+        event_date: date,
+        event_time_label: str,
+        class_label: str,
+        assignment_index: Dict[str, _AssignmentPageInfo],
     ) -> str:
         """Chooses the best quiz/test module URL for quiz or test events."""
         if self._is_quiz_page_url(page_url):
@@ -984,7 +1408,15 @@ class MoodleCrawler:
                 candidates.append(anchor)
         if not candidates:
             if category == "Test":
-                return self._resolve_homework_submission_url(page_url, anchors, event_title)
+                return self._resolve_homework_submission_url(
+                    page_url,
+                    anchors,
+                    event_title,
+                    event_date,
+                    event_time_label,
+                    class_label,
+                    assignment_index,
+                )
             return page_url
 
         title_tokens = self._tokenize_title(event_title)
@@ -1002,7 +1434,15 @@ class MoodleCrawler:
         resolved_quiz_url = self._to_quiz_page_url(best_url)
 
         if category == "Test" and "/course/view.php" in resolved_quiz_url.lower():
-            return self._resolve_homework_submission_url(page_url, anchors, event_title)
+            return self._resolve_homework_submission_url(
+                page_url,
+                anchors,
+                event_title,
+                event_date,
+                event_time_label,
+                class_label,
+                assignment_index,
+            )
         return resolved_quiz_url
 
     def _is_quiz_page_url(self, url: str) -> bool:
@@ -1135,9 +1575,40 @@ class MoodleCrawler:
         return self._normalize_whitespace(cleaned)
 
     def _dedupe_events(self, events: List[MoodleEvent]) -> List[MoodleEvent]:
-        """Removes duplicate parsed events while keeping deterministic ordering."""
-        sorted_events = sorted(
-            events,
+        """Removes duplicate parsed events while preferring higher-quality source URLs."""
+        best_by_key: Dict[Tuple[str, str, str, str], MoodleEvent] = {}
+        for event in events:
+            key = (
+                event.event_date.isoformat(),
+                event.category.lower(),
+                event.title.lower(),
+                event.time_label.lower(),
+            )
+            current = best_by_key.get(key)
+            if current is None:
+                best_by_key[key] = event
+                continue
+            best_by_key[key] = self._pick_preferred_event(current, event)
+        primary_deduped = list(best_by_key.values())
+
+        # Second pass: collapse same source/date/time rows where only the extracted title differs.
+        best_by_source_key: Dict[Tuple[str, str, str, str], MoodleEvent] = {}
+        for event in primary_deduped:
+            source_key = self._canonical_url(event.source_url) if event.source_url else ""
+            key2 = (
+                event.event_date.isoformat(),
+                event.category.lower(),
+                event.time_label.lower(),
+                source_key,
+            )
+            current = best_by_source_key.get(key2)
+            if current is None:
+                best_by_source_key[key2] = event
+                continue
+            best_by_source_key[key2] = self._pick_preferred_event(current, event)
+
+        return sorted(
+            best_by_source_key.values(),
             key=lambda item: (
                 item.event_date.isoformat(),
                 item.category.lower(),
@@ -1145,20 +1616,40 @@ class MoodleCrawler:
                 item.time_label.lower(),
             ),
         )
-        deduped: List[MoodleEvent] = []
-        seen: Set[Tuple[str, str, str, str]] = set()
-        for event in sorted_events:
-            key = (
-                event.event_date.isoformat(),
-                event.category.lower(),
-                event.title.lower(),
-                event.time_label.lower(),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(event)
-        return deduped
+
+    def _pick_preferred_event(self, left: MoodleEvent, right: MoodleEvent) -> MoodleEvent:
+        """Returns the preferred event between two duplicate keys."""
+        left_score = self._source_quality_score(left.source_url)
+        right_score = self._source_quality_score(right.source_url)
+        if right_score > left_score:
+            return right
+        if left_score > right_score:
+            return left
+
+        left_title_generic = left.title.lower().endswith(" item")
+        right_title_generic = right.title.lower().endswith(" item")
+        if left_title_generic != right_title_generic:
+            return right if not right_title_generic else left
+
+        if len(right.details) > len(left.details):
+            return right
+        return left
+
+    def _source_quality_score(self, source_url: str) -> int:
+        """Scores source URLs so module pages beat generic course pages."""
+        lowered = source_url.lower()
+        score = 0
+        if "/course/view.php" in lowered:
+            score -= 20
+        if "/mod/assign/view.php" in lowered:
+            score += 40
+        if "action=editsubmission" in lowered or "action=submit" in lowered:
+            score += 15
+        if "/mod/quiz/view.php" in lowered:
+            score += 35
+        elif "/mod/quiz/" in lowered:
+            score += 20
+        return score
 
     def _filter_event_date_window(self, events: List[MoodleEvent]) -> List[MoodleEvent]:
         """Drops events far outside the active academic window to reduce false positives."""

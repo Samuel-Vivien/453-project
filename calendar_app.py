@@ -59,10 +59,13 @@ class CalendarApp(tk.Tk):
         self.selected_date = today
         self.next_item_id = 1
         self.items_by_day: Dict[str, List[CalendarItem]] = {}
-        self.moodle_crawler = MoodleCrawler()
+        # Higher page limit improves assignment metadata coverage for accurate class/date mapping.
+        self.moodle_crawler = MoodleCrawler(max_pages=60)
         self._url_tag_to_link: Dict[str, str] = {}
         self._error_window: Optional[tk.Toplevel] = None
         self._error_text: Optional[tk.Text] = None
+        self._clear_all_confirm_pending = False
+        self._clear_all_reset_after_id: Optional[str] = None
 
         self.style = ttk.Style(self)
         self.style.configure("SelectedDay.TButton", foreground="#0a4f9c")
@@ -209,6 +212,13 @@ class CalendarApp(tk.Tk):
             wraplength=320,
             style="Muted.TLabel",
         ).grid(row=4, column=0, columnspan=2, sticky="w")
+
+        self.clear_all_button = ttk.Button(
+            moodle_frame,
+            text="Clear All Calendar Data",
+            command=self._on_clear_all_requested,
+        )
+        self.clear_all_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(self, textvariable=self.status_var, relief="groove", anchor="w", padding=6).grid(
@@ -387,6 +397,45 @@ class CalendarApp(tk.Tk):
         if not keep_status:
             self._set_status("Editor cleared")
 
+    def _on_clear_all_requested(self) -> None:
+        """Handles in-window two-click confirmation before deleting all saved data."""
+        if not self.items_by_day:
+            self._set_status("Calendar is already empty.")
+            self._reset_clear_all_confirmation()
+            return
+
+        if not self._clear_all_confirm_pending:
+            self._clear_all_confirm_pending = True
+            self.clear_all_button.config(text="Confirm Clear All")
+            if self._clear_all_reset_after_id is not None:
+                self.after_cancel(self._clear_all_reset_after_id)
+            self._clear_all_reset_after_id = self.after(
+                8000,
+                lambda: self._reset_clear_all_confirmation(timeout_notice=True),
+            )
+            self._set_status("Click 'Confirm Clear All' within 8 seconds to reset all calendar data.")
+            return
+
+        day_count = len(self.items_by_day)
+        item_count = sum(len(items) for items in self.items_by_day.values())
+        self.items_by_day.clear()
+        self.next_item_id = 1
+        self._reset_clear_all_confirmation()
+        self._save_items()
+        self._refresh_calendar()
+        self._clear_editor(keep_status=True)
+        self._set_status(f"Cleared {item_count} items across {day_count} day(s).")
+
+    def _reset_clear_all_confirmation(self, timeout_notice: bool = False) -> None:
+        """Resets clear-all confirmation state and restores default button text."""
+        if self._clear_all_reset_after_id is not None:
+            self.after_cancel(self._clear_all_reset_after_id)
+            self._clear_all_reset_after_id = None
+        self._clear_all_confirm_pending = False
+        self.clear_all_button.config(text="Clear All Calendar Data")
+        if timeout_notice:
+            self._set_status("Clear-all confirmation timed out.")
+
     def _on_details_changed(self, _event: object) -> None:
         """Schedules URL tagging after text edits complete."""
         self.after_idle(self._refresh_details_links)
@@ -494,13 +543,21 @@ class CalendarApp(tk.Tk):
 
     def _store_moodle_events(self, events: List[MoodleEvent]) -> tuple[int, int, int]:
         """Adds parsed Moodle events and upgrades duplicate source URLs when possible."""
+        removed_count = self._dedupe_existing_import_items()
         existing_signatures = set()
+        existing_legacy_signatures = set()
         for day_key, day_items in self.items_by_day.items():
             for item in day_items:
-                existing_signatures.add(
+                signature = (
+                    day_key,
+                    item.title.strip().lower(),
+                    item.time_label.strip().lower(),
+                )
+                existing_signatures.add(signature)
+                existing_legacy_signatures.add(
                     (
                         day_key,
-                        item.title.strip().lower(),
+                        self._strip_class_title_prefix(item.title).lower(),
                         item.time_label.strip().lower(),
                     )
                 )
@@ -519,12 +576,27 @@ class CalendarApp(tk.Tk):
                 title.strip().lower(),
                 event.time_label.strip().lower(),
             )
-            if normalized_signature in existing_signatures:
+            legacy_signature = (
+                date_key,
+                self._strip_class_title_prefix(title).lower(),
+                event.time_label.strip().lower(),
+            )
+            if normalized_signature in existing_signatures or legacy_signature in existing_legacy_signatures:
                 existing_item = self._find_item_by_signature(
                     date_key,
                     title=title,
                     time_label=event.time_label,
                 )
+                if existing_item is None:
+                    existing_item = self._find_item_by_legacy_signature(
+                        date_key,
+                        title=title,
+                        time_label=event.time_label,
+                    )
+                if existing_item is not None:
+                    if existing_item.title != title and self._is_better_event_title(existing_item.title, title):
+                        existing_item.title = title
+                        updated_count += 1
                 if existing_item is not None and self._try_upgrade_item_source_url(existing_item, event.source_url):
                     updated_count += 1
                 skipped_count += 1
@@ -545,9 +617,10 @@ class CalendarApp(tk.Tk):
             )
             self.next_item_id += 1
             existing_signatures.add(normalized_signature)
+            existing_legacy_signatures.add(legacy_signature)
             added_count += 1
 
-        if added_count or updated_count:
+        if added_count or updated_count or removed_count:
             self._save_items()
         return added_count, skipped_count, updated_count
 
@@ -557,6 +630,16 @@ class CalendarApp(tk.Tk):
         target_time = time_label.strip().lower()
         for item in self.items_by_day.get(date_key, []):
             if item.title.strip().lower() == target_title and item.time_label.strip().lower() == target_time:
+                return item
+        return None
+
+    def _find_item_by_legacy_signature(self, date_key: str, title: str, time_label: str) -> Optional[CalendarItem]:
+        """Finds existing items by normalized title without class-prefix decorations."""
+        target_title = self._strip_class_title_prefix(title).lower()
+        target_time = time_label.strip().lower()
+        for item in self.items_by_day.get(date_key, []):
+            item_title = self._strip_class_title_prefix(item.title).lower()
+            if item_title == target_title and item.time_label.strip().lower() == target_time:
                 return item
         return None
 
@@ -597,6 +680,58 @@ class CalendarApp(tk.Tk):
                 return f"{stripped}\nSource: {source_url}"
             return f"Source: {source_url}"
         return "\n".join(lines).strip()
+
+    def _strip_class_title_prefix(self, title: str) -> str:
+        """Removes `[Class Name]` prefix so imports can match older title formats."""
+        return re.sub(r"^\[[^\]]+\]\s*", "", title.strip())
+
+    def _is_better_event_title(self, current_title: str, candidate_title: str) -> bool:
+        """Returns True when candidate title has richer context than current title."""
+        current_has_class = current_title.strip().startswith("[") and "]" in current_title
+        candidate_has_class = candidate_title.strip().startswith("[") and "]" in candidate_title
+        if candidate_has_class and not current_has_class:
+            return True
+        if len(candidate_title.strip()) > len(current_title.strip()) + 3:
+            return True
+        return False
+
+    def _dedupe_existing_import_items(self) -> int:
+        """Collapses existing same-day same-time duplicate rows caused by format migrations."""
+        removed_count = 0
+        for day_key, items in list(self.items_by_day.items()):
+            best_by_key: Dict[tuple[str, str], CalendarItem] = {}
+            for item in items:
+                key = (
+                    self._strip_class_title_prefix(item.title).lower(),
+                    item.time_label.strip().lower(),
+                )
+                current = best_by_key.get(key)
+                if current is None:
+                    best_by_key[key] = item
+                    continue
+                best_by_key[key] = self._choose_preferred_import_item(current, item)
+
+            deduped_items = list(best_by_key.values())
+            removed_count += max(0, len(items) - len(deduped_items))
+            self.items_by_day[day_key] = deduped_items
+        return removed_count
+
+    def _choose_preferred_import_item(self, left: CalendarItem, right: CalendarItem) -> CalendarItem:
+        """Keeps the stronger item when import dedupes existing same-signature entries."""
+        left_source = self._extract_source_url(left.details)
+        right_source = self._extract_source_url(right.details)
+        if self._is_better_source_url(left_source, right_source):
+            return right
+        if self._is_better_source_url(right_source, left_source):
+            return left
+
+        if self._is_better_event_title(left.title, right.title):
+            return right
+        if self._is_better_event_title(right.title, left.title):
+            return left
+        if len(right.details) > len(left.details):
+            return right
+        return left
 
     def _is_better_source_url(self, current_url: str, candidate_url: str) -> bool:
         """Returns True when candidate URL is a higher-quality Moodle activity destination."""
