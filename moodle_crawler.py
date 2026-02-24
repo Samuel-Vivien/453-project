@@ -226,6 +226,9 @@ class MoodleCrawler:
     )
     _SSO_PATH_HINTS = ("saml", "oauth", "signin", "login", "authorize")
     _SELENIUM_WAIT_SECONDS = 25
+    _MANUAL_CREDENTIAL_WAIT_SECONDS = 60
+    _MANUAL_PASSWORD_WAIT_SECONDS = 60
+    _MFA_WAIT_SECONDS = 60
     _MAX_PAST_DAYS = 365
     _MAX_FUTURE_DAYS = 730
 
@@ -358,6 +361,7 @@ class MoodleCrawler:
             edge_options = EdgeOptions()
             edge_options.add_argument("--disable-gpu")
             edge_options.add_argument("--window-size=1380,980")
+            edge_options.add_argument("--inprivate")
             edge_driver = webdriver.Edge(options=edge_options)
             return edge_driver, "Edge", ""
         except WebDriverException as exc:
@@ -367,6 +371,7 @@ class MoodleCrawler:
             chrome_options = ChromeOptions()
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1380,980")
+            chrome_options.add_argument("--incognito")
             chrome_driver = webdriver.Chrome(options=chrome_options)
             return chrome_driver, "Chrome", ""
         except WebDriverException as exc:
@@ -384,7 +389,6 @@ class MoodleCrawler:
     ) -> Tuple[bool, str]:
         """Performs Microsoft-style SSO using username/password and waits for Moodle redirect."""
         By = selenium_bundle["By"]
-        EC = selenium_bundle["EC"]
         WebDriverWait = selenium_bundle["WebDriverWait"]
         TimeoutException = selenium_bundle["TimeoutException"]
 
@@ -419,7 +423,21 @@ class MoodleCrawler:
             self._click_first_if_present(driver, By, ("idBtn_Back",))
             self._click_first_if_present(driver, By, ("idSIButton9",))
             self._wait_for_document_ready(driver)
-            wait.until(lambda d: urlparse(d.current_url).netloc.lower() == moodle_host)
+
+            if self._wait_for_redirect_to_host(driver, moodle_host, self._SELENIUM_WAIT_SECONDS):
+                return True, "SSO login successful."
+
+            # Always leave the browser open for credential correction after automated submit.
+            if self._wait_for_redirect_to_host(driver, moodle_host, self._MANUAL_CREDENTIAL_WAIT_SECONDS):
+                return True, "SSO login successful after manual credential correction."
+
+            # Also leave a separate window for manual password correction.
+            if self._wait_for_redirect_to_host(driver, moodle_host, self._MANUAL_PASSWORD_WAIT_SECONDS):
+                return True, "SSO login successful after manual password correction."
+
+            # Then leave the browser open for phone-based MFA approval.
+            if self._wait_for_redirect_to_host(driver, moodle_host, self._MFA_WAIT_SECONDS):
+                return True, "SSO login successful after manual phone verification."
         except TimeoutException:
             return (
                 False,
@@ -428,7 +446,14 @@ class MoodleCrawler:
         except Exception as exc:
             return False, f"Browser SSO login failed: {exc}"
 
-        return True, "SSO login successful."
+        if self._looks_like_credential_failure(driver):
+            return (
+                False,
+                "SSO login failed after waiting 60 seconds for username correction, 60 seconds for password correction, and 60 seconds for phone verification.",
+            )
+        if self._looks_like_mfa_challenge(driver):
+            return False, "SSO login timed out waiting for Microsoft phone verification."
+        return False, "SSO login timed out before returning to Moodle."
 
     def _click_first_if_present(self, driver, by, element_ids: Sequence[str]) -> bool:
         """Clicks the first visible+enabled element from a list of candidate IDs."""
@@ -457,6 +482,57 @@ class MoodleCrawler:
             if str(ready_state).lower() == "complete":
                 return
             time.sleep(0.2)
+
+    def _wait_for_redirect_to_host(self, driver, expected_host: str, timeout_seconds: int) -> bool:
+        """Waits until the browser is redirected to the expected host."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            current_host = urlparse(str(getattr(driver, "current_url", ""))).netloc.lower()
+            if current_host == expected_host:
+                return True
+            time.sleep(0.4)
+        current_host = urlparse(str(getattr(driver, "current_url", ""))).netloc.lower()
+        return current_host == expected_host
+
+    def _looks_like_credential_failure(self, driver) -> bool:
+        """Detects common Microsoft SSO credential failure messages."""
+        page = (driver.page_source or "").lower()
+        url_hint = (driver.current_url or "").lower()
+        return any(
+            token in page or token in url_hint
+            for token in (
+                "your account or password is incorrect",
+                "incorrect password",
+                "incorrect username",
+                "that microsoft account doesn't exist",
+                "we couldn't find an account with that username",
+                "enter a valid email address",
+                "invalid username",
+                "invalid password",
+                "try again",
+            )
+        )
+
+    def _looks_like_mfa_challenge(self, driver) -> bool:
+        """Detects common Microsoft SSO two-factor challenge pages."""
+        page = (driver.page_source or "").lower()
+        url_hint = (driver.current_url or "").lower()
+        return any(
+            token in page or token in url_hint
+            for token in (
+                "approve sign in request",
+                "check your phone",
+                "microsoft authenticator",
+                "verify your identity",
+                "verification code",
+                "two-step verification",
+                "security info",
+                "additional security verification",
+                "enter code",
+                "multi-factor authentication",
+                "mfa",
+            )
+        )
 
     def _collect_pages_with_driver(self, driver, start_url: str) -> List[Tuple[str, str]]:
         """Collects Moodle pages by following candidate links in an authenticated browser session."""

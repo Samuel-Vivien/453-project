@@ -30,3 +30,4 @@ py -3 calendar_app.py
 - Use `Moodle Import` to crawl a Moodle URL and auto-import homework, quiz, and test dates.
 - If the Moodle page requires authentication, enter username/password in the same panel and import again.
 - For external SSO (for example Microsoft login), install Selenium once (`py -3 -m pip install selenium`) so the app can automate sign-in and import dates.
+- During Microsoft SSO, the app waits up to 60 seconds for username correction, 60 seconds for password correction, and then 60 seconds for phone-based MFA approval.
