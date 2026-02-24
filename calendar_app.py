@@ -61,6 +61,8 @@ class CalendarApp(tk.Tk):
         self.items_by_day: Dict[str, List[CalendarItem]] = {}
         self.moodle_crawler = MoodleCrawler()
         self._url_tag_to_link: Dict[str, str] = {}
+        self._error_window: Optional[tk.Toplevel] = None
+        self._error_text: Optional[tk.Text] = None
 
         self.style = ttk.Style(self)
         self.style.configure("SelectedDay.TButton", foreground="#0a4f9c")
@@ -448,6 +450,7 @@ class CalendarApp(tk.Tk):
         moodle_url = self.moodle_url_var.get().strip()
         if not moodle_url:
             self._set_status("Enter a Moodle URL before importing.")
+            self._show_error("Enter a Moodle URL before importing.", "Missing Moodle URL")
             return
 
         username = self.moodle_username_var.get().strip()
@@ -455,31 +458,42 @@ class CalendarApp(tk.Tk):
         self._set_status("Reading Moodle pages...")
         self.update_idletasks()
 
-        events, login_required, message = self.moodle_crawler.crawl(
-            moodle_url,
-            username=username,
-            password=password,
-        )
+        try:
+            events, login_required, message = self.moodle_crawler.crawl(
+                moodle_url,
+                username=username,
+                password=password,
+            )
+        except Exception as exc:
+            message = f"Unexpected import error: {exc}"
+            self.moodle_info_var.set(message)
+            self._set_status(message)
+            self._show_error(message, "Moodle Import Error")
+            return
 
         if login_required:
             self.moodle_info_var.set(message)
             self._set_status(message)
+            self._show_error(message, "Moodle Login Error")
             self.moodle_username_entry.focus_set()
             return
 
         if not events:
             self.moodle_info_var.set(message)
             self._set_status(message)
+            self._show_error(message, "Moodle Import Error")
             return
 
-        added_count, skipped_count = self._store_moodle_events(events)
+        added_count, skipped_count, updated_count = self._store_moodle_events(events)
         self._refresh_calendar()
         self._refresh_item_list()
         self.moodle_info_var.set(message)
-        self._set_status(f"Imported {added_count} Moodle items. Skipped {skipped_count} duplicates.")
+        self._set_status(
+            f"Imported {added_count} Moodle items. Updated {updated_count} existing items. Skipped {skipped_count} duplicates."
+        )
 
-    def _store_moodle_events(self, events: List[MoodleEvent]) -> tuple[int, int]:
-        """Adds parsed Moodle events to calendar storage while avoiding duplicates."""
+    def _store_moodle_events(self, events: List[MoodleEvent]) -> tuple[int, int, int]:
+        """Adds parsed Moodle events and upgrades duplicate source URLs when possible."""
         existing_signatures = set()
         for day_key, day_items in self.items_by_day.items():
             for item in day_items:
@@ -493,6 +507,7 @@ class CalendarApp(tk.Tk):
 
         added_count = 0
         skipped_count = 0
+        updated_count = 0
         for event in events:
             date_key = event.event_date.isoformat()
             title = event.title.strip() or f"{event.category} item"
@@ -505,6 +520,13 @@ class CalendarApp(tk.Tk):
                 event.time_label.strip().lower(),
             )
             if normalized_signature in existing_signatures:
+                existing_item = self._find_item_by_signature(
+                    date_key,
+                    title=title,
+                    time_label=event.time_label,
+                )
+                if existing_item is not None and self._try_upgrade_item_source_url(existing_item, event.source_url):
+                    updated_count += 1
                 skipped_count += 1
                 continue
 
@@ -525,9 +547,95 @@ class CalendarApp(tk.Tk):
             existing_signatures.add(normalized_signature)
             added_count += 1
 
-        if added_count:
+        if added_count or updated_count:
             self._save_items()
-        return added_count, skipped_count
+        return added_count, skipped_count, updated_count
+
+    def _find_item_by_signature(self, date_key: str, title: str, time_label: str) -> Optional[CalendarItem]:
+        """Returns an existing item matching the import signature tuple."""
+        target_title = title.strip().lower()
+        target_time = time_label.strip().lower()
+        for item in self.items_by_day.get(date_key, []):
+            if item.title.strip().lower() == target_title and item.time_label.strip().lower() == target_time:
+                return item
+        return None
+
+    def _try_upgrade_item_source_url(self, item: CalendarItem, new_source_url: str) -> bool:
+        """Upgrades an item's Source URL when import provides a better assignment link."""
+        new_source = new_source_url.strip()
+        if not new_source:
+            return False
+
+        old_source = self._extract_source_url(item.details)
+        if not self._is_better_source_url(old_source, new_source):
+            return False
+
+        item.details = self._replace_source_url(item.details, new_source)
+        return True
+
+    def _extract_source_url(self, details: str) -> str:
+        """Extracts the current Source URL from details text, if present."""
+        for line in reversed(details.splitlines()):
+            trimmed = line.strip()
+            if trimmed.lower().startswith("source:"):
+                return trimmed.split(":", 1)[1].strip()
+        return ""
+
+    def _replace_source_url(self, details: str, source_url: str) -> str:
+        """Replaces existing Source line or appends one when missing."""
+        lines = details.splitlines()
+        replaced = False
+        for idx in range(len(lines) - 1, -1, -1):
+            if lines[idx].strip().lower().startswith("source:"):
+                lines[idx] = f"Source: {source_url}"
+                replaced = True
+                break
+
+        if not replaced:
+            stripped = details.strip()
+            if stripped:
+                return f"{stripped}\nSource: {source_url}"
+            return f"Source: {source_url}"
+        return "\n".join(lines).strip()
+
+    def _is_better_source_url(self, current_url: str, candidate_url: str) -> bool:
+        """Returns True when candidate URL is a higher-quality Moodle activity destination."""
+        current = current_url.strip().lower()
+        candidate = candidate_url.strip().lower()
+        if not candidate:
+            return False
+        if candidate == current:
+            return False
+        if not current:
+            return True
+
+        current_is_course = "/course/view.php" in current
+        candidate_is_course = "/course/view.php" in candidate
+        current_is_assign = "/mod/assign/view.php" in current
+        candidate_is_assign = "/mod/assign/view.php" in candidate
+        current_is_quiz = "/mod/quiz/" in current
+        candidate_is_quiz = "/mod/quiz/" in candidate
+        if candidate_is_assign and not current_is_assign:
+            return True
+        if candidate_is_quiz and not current_is_quiz:
+            return True
+        if current_is_course and not candidate_is_course:
+            return True
+        if candidate_is_assign and current_is_assign:
+            current_has_action = "action=editsubmission" in current or "action=submit" in current
+            candidate_has_action = "action=editsubmission" in candidate or "action=submit" in candidate
+            if candidate_has_action and not current_has_action:
+                return True
+        if candidate_is_quiz and current_is_quiz:
+            current_is_view = "/mod/quiz/view.php" in current
+            candidate_is_view = "/mod/quiz/view.php" in candidate
+            if candidate_is_view and not current_is_view:
+                return True
+            current_has_id = "id=" in current
+            candidate_has_id = "id=" in candidate
+            if candidate_has_id and not current_has_id:
+                return True
+        return False
 
     def _selected_index(self) -> Optional[int]:
         """Returns the currently selected listbox index, if any."""
@@ -550,6 +658,51 @@ class CalendarApp(tk.Tk):
         """Writes a short message into the in-window status bar."""
         self.status_var.set(message)
 
+    def _show_error(self, message: str, title: str = "Error") -> None:
+        """Shows a non-modal, resizable error window that the user can close anytime."""
+        if self._error_window is None or not self._error_window.winfo_exists():
+            self._error_window = tk.Toplevel(self)
+            self._error_window.title(title)
+            self._error_window.geometry("560x260")
+            self._error_window.minsize(420, 180)
+            self._error_window.resizable(True, True)
+            self._error_window.transient(self)
+            self._error_window.protocol("WM_DELETE_WINDOW", self._close_error_window)
+            self._error_window.columnconfigure(0, weight=1)
+            self._error_window.rowconfigure(1, weight=1)
+
+            ttk.Label(
+                self._error_window,
+                text="An error occurred. You can close or resize this window.",
+                style="Muted.TLabel",
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+
+            self._error_text = tk.Text(self._error_window, wrap="word")
+            self._error_text.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+            self._error_text.config(state="disabled")
+
+            button_row = ttk.Frame(self._error_window)
+            button_row.grid(row=2, column=0, sticky="e", padx=12, pady=(4, 10))
+            ttk.Button(button_row, text="Close", command=self._close_error_window).grid(row=0, column=0)
+        else:
+            self._error_window.title(title)
+
+        if self._error_text is not None:
+            self._error_text.config(state="normal")
+            self._error_text.delete("1.0", tk.END)
+            self._error_text.insert("1.0", message)
+            self._error_text.config(state="disabled")
+
+        self._error_window.deiconify()
+        self._error_window.lift()
+
+    def _close_error_window(self) -> None:
+        """Destroys the error window so users can continue with the main interface."""
+        if self._error_window is not None and self._error_window.winfo_exists():
+            self._error_window.destroy()
+        self._error_window = None
+        self._error_text = None
+
     def _date_key(self, value: date) -> str:
         """Normalizes a date object into the dictionary key format."""
         return value.isoformat()
@@ -561,7 +714,9 @@ class CalendarApp(tk.Tk):
         try:
             payload = json.loads(DATA_FILE.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
-            self._set_status("Could not parse existing data file; starting with empty data.")
+            message = "Could not parse existing data file; starting with empty data."
+            self._set_status(message)
+            self._show_error(message, "Data File Error")
             return
 
         loaded_map = payload.get("items_by_day", {})
@@ -598,7 +753,9 @@ class CalendarApp(tk.Tk):
         try:
             DATA_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
-            self._set_status("Could not save data to disk.")
+            message = "Could not save data to disk."
+            self._set_status(message)
+            self._show_error(message, "Save Error")
 
 
 def main() -> None:

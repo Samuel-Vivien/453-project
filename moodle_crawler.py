@@ -11,7 +11,7 @@ import re
 import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 
@@ -25,6 +25,14 @@ class MoodleEvent:
     time_label: str = ""
     details: str = ""
     source_url: str = ""
+
+
+@dataclass
+class _AnchorLink:
+    """Represents one parsed anchor with href and visible text."""
+
+    href: str
+    text: str
 
 
 class _VisibleTextParser(HTMLParser):
@@ -103,15 +111,31 @@ class _LinkParser(HTMLParser):
 
     def __init__(self) -> None:
         super().__init__()
-        self.links: List[str] = []
+        self.links: List[_AnchorLink] = []
+        self._current_href: str = ""
+        self._current_text_parts: List[str] = []
 
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
         if tag.lower() != "a":
             return
         attrs_map = {key.lower(): value for key, value in attrs if key and value is not None}
         href = attrs_map.get("href", "").strip()
-        if href:
-            self.links.append(href)
+        self._current_href = href
+        self._current_text_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if not self._current_href:
+            return
+        if data.strip():
+            self._current_text_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "a" or not self._current_href:
+            return
+        text = re.sub(r"\s+", " ", "".join(self._current_text_parts)).strip()
+        self.links.append(_AnchorLink(href=self._current_href, text=text))
+        self._current_href = ""
+        self._current_text_parts = []
 
 
 class _LoginFormParser(HTMLParser):
@@ -218,6 +242,32 @@ class MoodleCrawler:
         "available",
         "date",
     )
+    _TITLE_STOP_WORDS = {
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "that",
+        "this",
+        "assignment",
+        "homework",
+        "quiz",
+        "test",
+        "exam",
+        "done",
+        "view",
+        "receive",
+        "grade",
+        "make",
+        "submission",
+        "feedback",
+        "is",
+        "are",
+        "to",
+        "a",
+        "an",
+    }
     _SSO_HOST_HINTS = (
         "microsoftonline.com",
         "okta.com",
@@ -361,7 +411,6 @@ class MoodleCrawler:
             edge_options = EdgeOptions()
             edge_options.add_argument("--disable-gpu")
             edge_options.add_argument("--window-size=1380,980")
-            edge_options.add_argument("--inprivate")
             edge_driver = webdriver.Edge(options=edge_options)
             return edge_driver, "Edge", ""
         except WebDriverException as exc:
@@ -371,7 +420,6 @@ class MoodleCrawler:
             chrome_options = ChromeOptions()
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1380,980")
-            chrome_options.add_argument("--incognito")
             chrome_driver = webdriver.Chrome(options=chrome_options)
             return chrome_driver, "Chrome", ""
         except WebDriverException as exc:
@@ -717,7 +765,8 @@ class MoodleCrawler:
         links: List[str] = []
         root_host = urlparse(root_url).netloc.lower()
 
-        for href in parser.links:
+        for anchor in parser.links:
+            href = anchor.href
             if href.startswith("#") or href.lower().startswith(("mailto:", "javascript:")):
                 continue
             absolute = urljoin(base_url, href)
@@ -746,6 +795,7 @@ class MoodleCrawler:
         plain_text = self._html_to_plain_text(html)
         lines = [self._normalize_whitespace(line) for line in plain_text.splitlines()]
         lines = [line for line in lines if line]
+        page_links = self._extract_anchor_links(page_url, html)
 
         events: List[MoodleEvent] = []
         seen_page_keys: Set[Tuple[str, str, str, str]] = set()
@@ -787,7 +837,13 @@ class MoodleCrawler:
                 continue
             seen_page_keys.add(event_key)
 
-            details = f"{parsed_context}\nSource: {page_url}"
+            source_url = page_url
+            if category == "Homework":
+                source_url = self._resolve_homework_submission_url(page_url, page_links, title)
+            elif category in {"Quiz", "Test"}:
+                source_url = self._resolve_quiz_test_url(page_url, page_links, title, category)
+
+            details = f"{parsed_context}\nSource: {source_url}"
             events.append(
                 MoodleEvent(
                     title=title,
@@ -795,11 +851,188 @@ class MoodleCrawler:
                     event_date=event_date,
                     time_label=time_label,
                     details=details,
-                    source_url=page_url,
+                    source_url=source_url,
                 )
             )
 
         return events
+
+    def _extract_anchor_links(self, base_url: str, html: str) -> List[_AnchorLink]:
+        """Returns absolute in-page links with visible text."""
+        parser = _LinkParser()
+        parser.feed(html)
+        anchors: List[_AnchorLink] = []
+        for anchor in parser.links:
+            href = anchor.href.strip()
+            if not href or href.startswith("#") or href.lower().startswith(("mailto:", "javascript:")):
+                continue
+            absolute = urljoin(base_url, href)
+            anchors.append(_AnchorLink(href=absolute, text=self._normalize_whitespace(anchor.text)))
+        return anchors
+
+    def _resolve_homework_submission_url(
+        self,
+        page_url: str,
+        anchors: List[_AnchorLink],
+        event_title: str,
+    ) -> str:
+        """Chooses the best Moodle assignment submission URL for a homework event."""
+        if self._is_assignment_page_url(page_url):
+            direct_link = self._find_submission_action_link(anchors)
+            if direct_link:
+                return self._to_submission_page_url(direct_link)
+            return self._to_submission_page_url(page_url)
+
+        candidates: List[_AnchorLink] = []
+        for anchor in anchors:
+            if self._is_assignment_page_url(anchor.href):
+                candidates.append(anchor)
+        if not candidates:
+            return page_url
+
+        title_tokens = self._tokenize_title(event_title)
+        if not title_tokens:
+            return self._to_submission_page_url(candidates[0].href)
+
+        best_score = -1
+        best_url = candidates[0].href
+        for candidate in candidates:
+            link_tokens = self._tokenize_title(candidate.text)
+            score = len(title_tokens.intersection(link_tokens))
+            if score > best_score:
+                best_score = score
+                best_url = candidate.href
+        return self._to_submission_page_url(best_url)
+
+    def _is_assignment_page_url(self, url: str) -> bool:
+        """Returns True for Moodle assignment URLs."""
+        parsed = urlparse(url)
+        return "/mod/assign/view.php" in parsed.path.lower() or "/mod/assign/" in parsed.path.lower()
+
+    def _find_submission_action_link(self, anchors: List[_AnchorLink]) -> str:
+        """Finds explicit assignment submission links from available anchors."""
+        for anchor in anchors:
+            parsed = urlparse(anchor.href)
+            if not self._is_assignment_page_url(anchor.href):
+                continue
+            query_map = {key.lower(): value for key, value in parse_qsl(parsed.query, keep_blank_values=True)}
+            action = query_map.get("action", "").strip().lower()
+            text = anchor.text.lower()
+            if action in {"editsubmission", "submit"}:
+                return anchor.href
+            if "add submission" in text or "edit submission" in text or "submission" in text:
+                return anchor.href
+        return ""
+
+    def _to_submission_page_url(self, assignment_url: str) -> str:
+        """Normalizes assignment URLs to submission-page variants."""
+        if not self._is_assignment_page_url(assignment_url):
+            return assignment_url
+
+        parsed = urlparse(assignment_url)
+        existing_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        query_pairs: List[Tuple[str, str]] = []
+        has_action = False
+        for key, value in existing_pairs:
+            if key.lower() == "action":
+                has_action = True
+                if value.strip().lower() in {"editsubmission", "submit"}:
+                    query_pairs.append((key, value))
+                continue
+            query_pairs.append((key, value))
+
+        if not has_action:
+            query_pairs.append(("action", "editsubmission"))
+        elif not any(k.lower() == "action" for k, _ in query_pairs):
+            query_pairs.append(("action", "editsubmission"))
+
+        normalized_query = urlencode(query_pairs, doseq=True)
+        return urlunparse(
+            (
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                normalized_query,
+                parsed.fragment,
+            )
+        )
+
+    def _tokenize_title(self, value: str) -> Set[str]:
+        """Normalizes a title into informative tokens for fuzzy matching."""
+        raw_tokens = re.findall(r"[a-z0-9]+", value.lower())
+        return {
+            token
+            for token in raw_tokens
+            if len(token) >= 2 and token not in self._TITLE_STOP_WORDS
+        }
+
+    def _resolve_quiz_test_url(
+        self,
+        page_url: str,
+        anchors: List[_AnchorLink],
+        event_title: str,
+        category: str,
+    ) -> str:
+        """Chooses the best quiz/test module URL for quiz or test events."""
+        if self._is_quiz_page_url(page_url):
+            return self._to_quiz_page_url(page_url)
+
+        candidates: List[_AnchorLink] = []
+        for anchor in anchors:
+            if self._is_quiz_page_url(anchor.href):
+                candidates.append(anchor)
+        if not candidates:
+            if category == "Test":
+                return self._resolve_homework_submission_url(page_url, anchors, event_title)
+            return page_url
+
+        title_tokens = self._tokenize_title(event_title)
+        if not title_tokens:
+            return self._to_quiz_page_url(candidates[0].href)
+
+        best_score = -1
+        best_url = candidates[0].href
+        for candidate in candidates:
+            link_tokens = self._tokenize_title(candidate.text)
+            score = len(title_tokens.intersection(link_tokens))
+            if score > best_score:
+                best_score = score
+                best_url = candidate.href
+        resolved_quiz_url = self._to_quiz_page_url(best_url)
+
+        if category == "Test" and "/course/view.php" in resolved_quiz_url.lower():
+            return self._resolve_homework_submission_url(page_url, anchors, event_title)
+        return resolved_quiz_url
+
+    def _is_quiz_page_url(self, url: str) -> bool:
+        """Returns True for Moodle quiz module URLs."""
+        parsed = urlparse(url)
+        return "/mod/quiz/" in parsed.path.lower()
+
+    def _to_quiz_page_url(self, quiz_url: str) -> str:
+        """Normalizes quiz URLs to a stable quiz-view destination."""
+        if not self._is_quiz_page_url(quiz_url):
+            return quiz_url
+
+        parsed = urlparse(quiz_url)
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        query_map = {key.lower(): value for key, value in query_pairs}
+
+        quiz_id = query_map.get("id", "").strip() or query_map.get("cmid", "").strip()
+        if quiz_id:
+            normalized_query = urlencode([("id", quiz_id)], doseq=True)
+            return urlunparse(
+                (
+                    parsed.scheme,
+                    parsed.netloc,
+                    "/mod/quiz/view.php",
+                    parsed.params,
+                    normalized_query,
+                    parsed.fragment,
+                )
+            )
+        return quiz_url
 
     def _html_to_plain_text(self, html: str) -> str:
         """Converts HTML markup to plain text."""
