@@ -16,6 +16,7 @@ Single-window desktop calendar built with Python + Tkinter.
 
 1. Double-click `Install Calendar App.bat`.
 2. After installation finishes, double-click `Run Calendar App.bat`.
+3. The launcher activates `.venv` automatically and deactivates it when the app closes.
 
 ### macOS
 
@@ -24,6 +25,7 @@ Single-window desktop calendar built with Python + Tkinter.
 3. If macOS blocks double-click execution, run this once in Terminal from the project folder:
    - `chmod +x "Install Calendar App.command" "Run Calendar App.command"`
    - then run `./Install\ Calendar\ App.command`
+4. The launcher activates `.venv` automatically and deactivates it when the app closes.
 
 ## Run (Manual)
 

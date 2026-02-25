@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from html import unescape
 from html.parser import HTMLParser
 import http.cookiejar
+import platform
 import re
 import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
@@ -398,6 +399,7 @@ class MoodleCrawler:
             from selenium.webdriver.chrome.options import Options as ChromeOptions  # type: ignore
             from selenium.webdriver.common.by import By  # type: ignore
             from selenium.webdriver.edge.options import Options as EdgeOptions  # type: ignore
+            from selenium.webdriver.safari.options import Options as SafariOptions  # type: ignore
             from selenium.webdriver.support import expected_conditions as EC  # type: ignore
             from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
         except Exception:
@@ -409,27 +411,40 @@ class MoodleCrawler:
             "WebDriverException": WebDriverException,
             "ChromeOptions": ChromeOptions,
             "EdgeOptions": EdgeOptions,
+            "SafariOptions": SafariOptions,
             "By": By,
             "EC": EC,
             "WebDriverWait": WebDriverWait,
         }
 
     def _create_webdriver(self, selenium_bundle: Dict[str, object]):
-        """Starts an Edge or Chrome webdriver using Selenium Manager auto-driver discovery."""
+        """Starts a platform-appropriate webdriver for SSO automation."""
         webdriver = selenium_bundle["webdriver"]
         WebDriverException = selenium_bundle["WebDriverException"]
         EdgeOptions = selenium_bundle["EdgeOptions"]
         ChromeOptions = selenium_bundle["ChromeOptions"]
+        SafariOptions = selenium_bundle["SafariOptions"]
 
         errors: List[str] = []
-        try:
-            edge_options = EdgeOptions()
-            edge_options.add_argument("--disable-gpu")
-            edge_options.add_argument("--window-size=1380,980")
-            edge_driver = webdriver.Edge(options=edge_options)
-            return edge_driver, "Edge", ""
-        except WebDriverException as exc:
-            errors.append(f"Edge: {exc}")
+        is_macos = platform.system().lower() == "darwin"
+
+        if is_macos:
+            try:
+                safari_options = SafariOptions()
+                safari_driver = webdriver.Safari(options=safari_options)
+                return safari_driver, "Safari", ""
+            except WebDriverException as exc:
+                errors.append(f"Safari: {exc}")
+
+        if not is_macos:
+            try:
+                edge_options = EdgeOptions()
+                edge_options.add_argument("--disable-gpu")
+                edge_options.add_argument("--window-size=1380,980")
+                edge_driver = webdriver.Edge(options=edge_options)
+                return edge_driver, "Edge", ""
+            except WebDriverException as exc:
+                errors.append(f"Edge: {exc}")
 
         try:
             chrome_options = ChromeOptions()

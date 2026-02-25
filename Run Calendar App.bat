@@ -9,10 +9,19 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
-if exist ".venv\Scripts\pythonw.exe" (
-    start "" ".venv\Scripts\pythonw.exe" "calendar_app.py"
-) else (
-    start "" ".venv\Scripts\python.exe" "calendar_app.py"
+call ".venv\Scripts\activate.bat"
+if errorlevel 1 (
+    echo Could not activate the virtual environment.
+    exit /b 1
 )
 
-exit /b 0
+if exist ".venv\Scripts\pythonw.exe" (
+    pythonw "calendar_app.py"
+) else (
+    python "calendar_app.py"
+)
+
+set "APP_EXIT_CODE=%errorlevel%"
+call deactivate >nul 2>&1
+
+exit /b %APP_EXIT_CODE%

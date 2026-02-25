@@ -5,16 +5,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-VENV_PY=".venv/bin/python3"
-if [[ ! -x "$VENV_PY" ]]; then
-    VENV_PY=".venv/bin/python"
-fi
-
-if [[ ! -x "$VENV_PY" ]]; then
+VENV_ACTIVATE=".venv/bin/activate"
+if [[ ! -f "$VENV_ACTIVATE" ]]; then
     echo "App dependencies are not installed yet."
     echo "Double-click \"Install Calendar App.command\" first."
     read -r -p "Press Enter to close..."
     exit 1
 fi
 
-"$VENV_PY" "calendar_app.py"
+source "$VENV_ACTIVATE"
+trap 'deactivate >/dev/null 2>&1 || true' EXIT
+
+python "calendar_app.py"
