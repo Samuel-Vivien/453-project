@@ -49,6 +49,7 @@ class CalendarApp(tk.Tk):
     """Main application window for managing daily calendar items."""
 
     def __init__(self) -> None:
+        """Initializes UI state, loads persisted data, and renders first view."""
         super().__init__()
         self.title("Desktop Calendar")
         self.geometry("1120x700")
@@ -79,7 +80,6 @@ class CalendarApp(tk.Tk):
         if removed_count:
             self._save_items()
         self._refresh_calendar()
-        self._refresh_item_list()
 
     def _build_layout(self) -> None:
         """Creates and arranges all widgets in the single main window."""
@@ -541,7 +541,6 @@ class CalendarApp(tk.Tk):
 
         added_count, skipped_count, updated_count = self._store_moodle_events(events)
         self._refresh_calendar()
-        self._refresh_item_list()
         self.moodle_info_var.set(safe_message)
         self._set_status(
             f"Imported {added_count} Moodle items. Updated {updated_count} existing items. Skipped {skipped_count} duplicates."

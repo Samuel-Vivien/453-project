@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from datetime import date, timedelta
 from html import unescape
@@ -83,11 +84,13 @@ class _VisibleTextParser(HTMLParser):
     }
 
     def __init__(self) -> None:
+        """Initializes parser state for collecting visible text fragments."""
         super().__init__()
         self._parts: List[str] = []
         self._skip_depth = 0
 
     def handle_starttag(self, tag: str, _attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        """Tracks block boundaries and enter/exit script/style skip sections."""
         tag = tag.lower()
         if tag in {"script", "style", "noscript"}:
             self._skip_depth += 1
@@ -98,6 +101,7 @@ class _VisibleTextParser(HTMLParser):
             self._parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        """Closes skip sections and emits line breaks for block-level end tags."""
         tag = tag.lower()
         if tag in {"script", "style", "noscript"} and self._skip_depth:
             self._skip_depth -= 1
@@ -108,6 +112,7 @@ class _VisibleTextParser(HTMLParser):
             self._parts.append("\n")
 
     def handle_data(self, data: str) -> None:
+        """Collects visible text content while discarding pure whitespace."""
         if self._skip_depth:
             return
         if data.strip():
@@ -122,12 +127,14 @@ class _LinkParser(HTMLParser):
     """Extracts links from anchor tags."""
 
     def __init__(self) -> None:
+        """Initializes parser state for anchor href/text capture."""
         super().__init__()
         self.links: List[_AnchorLink] = []
         self._current_href: str = ""
         self._current_text_parts: List[str] = []
 
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        """Starts collecting text for each anchor tag that has an href."""
         if tag.lower() != "a":
             return
         attrs_map = {key.lower(): value for key, value in attrs if key and value is not None}
@@ -136,12 +143,14 @@ class _LinkParser(HTMLParser):
         self._current_text_parts = []
 
     def handle_data(self, data: str) -> None:
+        """Accumulates visible text for the currently open anchor."""
         if not self._current_href:
             return
         if data.strip():
             self._current_text_parts.append(data)
 
     def handle_endtag(self, tag: str) -> None:
+        """Finalizes one anchor record with normalized visible text."""
         if tag.lower() != "a" or not self._current_href:
             return
         text = re.sub(r"\s+", " ", "".join(self._current_text_parts)).strip()
@@ -154,11 +163,13 @@ class _LoginFormParser(HTMLParser):
     """Finds login forms and captures hidden fields needed for submission."""
 
     def __init__(self) -> None:
+        """Initializes parser state used while scanning form/input tags."""
         super().__init__()
         self.forms: List[Dict[str, object]] = []
         self._current_form: Optional[Dict[str, object]] = None
 
     def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        """Captures form actions plus username/password and hidden input metadata."""
         attrs_map = {key.lower(): value for key, value in attrs if key and value is not None}
         lowered_tag = tag.lower()
 
@@ -190,6 +201,7 @@ class _LoginFormParser(HTMLParser):
                 hidden_inputs[input_name] = input_value
 
     def handle_endtag(self, tag: str) -> None:
+        """Stores completed login-capable forms once closing tag is reached."""
         if tag.lower() != "form" or self._current_form is None:
             return
         if self._current_form.get("has_username") and self._current_form.get("has_password"):
@@ -293,10 +305,10 @@ class MoodleCrawler:
     _MANUAL_CREDENTIAL_WAIT_SECONDS = 60
     _MANUAL_PASSWORD_WAIT_SECONDS = 60
     _MFA_WAIT_SECONDS = 60
-    _MAX_PAST_DAYS = 365
     _MAX_FUTURE_DAYS = 730
 
     def __init__(self, max_pages: int = 60, timeout_seconds: int = 15) -> None:
+        """Configures crawl depth and HTTP timeout behavior."""
         self.max_pages = max_pages
         self.timeout_seconds = timeout_seconds
 
@@ -399,7 +411,6 @@ class MoodleCrawler:
             from selenium.webdriver.chrome.options import Options as ChromeOptions  # type: ignore
             from selenium.webdriver.common.by import By  # type: ignore
             from selenium.webdriver.edge.options import Options as EdgeOptions  # type: ignore
-            from selenium.webdriver.safari.options import Options as SafariOptions  # type: ignore
             from selenium.webdriver.support import expected_conditions as EC  # type: ignore
             from selenium.webdriver.support.ui import WebDriverWait  # type: ignore
         except Exception:
@@ -411,7 +422,6 @@ class MoodleCrawler:
             "WebDriverException": WebDriverException,
             "ChromeOptions": ChromeOptions,
             "EdgeOptions": EdgeOptions,
-            "SafariOptions": SafariOptions,
             "By": By,
             "EC": EC,
             "WebDriverWait": WebDriverWait,
@@ -423,15 +433,13 @@ class MoodleCrawler:
         WebDriverException = selenium_bundle["WebDriverException"]
         EdgeOptions = selenium_bundle["EdgeOptions"]
         ChromeOptions = selenium_bundle["ChromeOptions"]
-        SafariOptions = selenium_bundle["SafariOptions"]
 
         errors: List[str] = []
         is_macos = platform.system().lower() == "darwin"
 
         if is_macos:
             try:
-                safari_options = SafariOptions()
-                safari_driver = webdriver.Safari(options=safari_options)
+                safari_driver = webdriver.Safari()
                 return safari_driver, "Safari", ""
             except WebDriverException as exc:
                 errors.append(f"Safari: {exc}")
@@ -540,6 +548,7 @@ class MoodleCrawler:
     def _wait_for_editable_input(self, driver, wait, locators: Sequence[Tuple[object, str]]):
         """Returns the first visible editable input among candidate locators."""
         def _find_input(d):
+            """Returns the first interactable text-like input from candidate locators."""
             for by, selector in locators:
                 try:
                     candidates = d.find_elements(by, selector)
@@ -692,10 +701,10 @@ class MoodleCrawler:
 
         pages: List[Tuple[str, str]] = [(current_url, first_html)]
         visited: Set[str] = {self._canonical_url(current_url)}
-        queue: List[str] = self._extract_candidate_links(current_url, first_html, start_url)
+        queue = deque(self._extract_candidate_links(current_url, first_html, start_url))
 
         while queue and len(pages) < self.max_pages:
-            next_url = queue.pop(0)
+            next_url = queue.popleft()
             canonical = self._canonical_url(next_url)
             if canonical in visited:
                 continue
@@ -837,10 +846,10 @@ class MoodleCrawler:
         """Crawls a limited set of Moodle pages likely to contain assignment dates."""
         pages: List[Tuple[str, str]] = [(start_url, start_html)]
         visited: Set[str] = {self._canonical_url(start_url)}
-        queue: List[str] = self._extract_candidate_links(start_url, start_html, start_url)
+        queue = deque(self._extract_candidate_links(start_url, start_html, start_url))
 
         while queue and len(pages) < self.max_pages:
-            next_url = queue.pop(0)
+            next_url = queue.popleft()
             canonical = self._canonical_url(next_url)
             if canonical in visited:
                 continue
