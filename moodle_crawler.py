@@ -468,18 +468,22 @@ class MoodleCrawler:
             return True, "Already authenticated."
 
         try:
-            username_input = wait.until(
-                lambda d: d.find_elements(By.ID, "i0116") or d.find_elements(By.NAME, "loginfmt")
-            )[0]
-            username_input.clear()
-            username_input.send_keys(username)
+            username_input = self._wait_for_editable_input(
+                driver,
+                wait,
+                ((By.ID, "i0116"), (By.NAME, "loginfmt")),
+            )
+            if username_input is None or not self._enter_text_into_input(driver, username_input, username):
+                return False, "SSO login failed: could not enter username in the Microsoft login form."
             self._click_first_if_present(driver, By, ("idSIButton9",))
 
-            password_input = wait.until(
-                lambda d: d.find_elements(By.ID, "i0118") or d.find_elements(By.NAME, "passwd")
-            )[0]
-            password_input.clear()
-            password_input.send_keys(password)
+            password_input = self._wait_for_editable_input(
+                driver,
+                wait,
+                ((By.ID, "i0118"), (By.NAME, "passwd")),
+            )
+            if password_input is None or not self._enter_text_into_input(driver, password_input, password):
+                return False, "SSO login failed: could not enter password in the Microsoft login form."
             self._click_first_if_present(driver, By, ("idSIButton9",))
 
             # Decline "Stay signed in?" to avoid changing account persistence.
@@ -518,6 +522,71 @@ class MoodleCrawler:
             return False, "SSO login timed out waiting for Microsoft phone verification."
         return False, "SSO login timed out before returning to Moodle."
 
+    def _wait_for_editable_input(self, driver, wait, locators: Sequence[Tuple[object, str]]):
+        """Returns the first visible editable input among candidate locators."""
+        def _find_input(d):
+            for by, selector in locators:
+                try:
+                    candidates = d.find_elements(by, selector)
+                except Exception:
+                    continue
+                for candidate in candidates:
+                    try:
+                        if not candidate.is_displayed() or not candidate.is_enabled():
+                            continue
+                        input_type = (candidate.get_attribute("type") or "").strip().lower()
+                        readonly = (candidate.get_attribute("readonly") or "").strip().lower()
+                        disabled = (candidate.get_attribute("disabled") or "").strip().lower()
+                        if input_type in {"hidden", "button", "submit"}:
+                            continue
+                        if readonly in {"readonly", "true"} or disabled in {"disabled", "true"}:
+                            continue
+                        return candidate
+                    except Exception:
+                        continue
+            return None
+
+        try:
+            return wait.until(_find_input)
+        except Exception:
+            return None
+
+    def _enter_text_into_input(self, driver, input_element, value: str) -> bool:
+        """Enters text into an input with JS fallback for strict Edge element-state checks."""
+        try:
+            input_element.click()
+        except Exception:
+            pass
+
+        try:
+            input_element.clear()
+        except Exception:
+            # Some SSO pages disallow clear() temporarily; JS fallback handles this path.
+            pass
+
+        try:
+            input_element.send_keys(value)
+        except Exception:
+            try:
+                driver.execute_script(
+                    "arguments[0].focus();"
+                    "arguments[0].value='';"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));"
+                    "arguments[0].value=arguments[1];"
+                    "arguments[0].dispatchEvent(new Event('input', {bubbles: true}));"
+                    "arguments[0].dispatchEvent(new Event('change', {bubbles: true}));",
+                    input_element,
+                    value,
+                )
+            except Exception:
+                return False
+
+        try:
+            entered_value = (input_element.get_attribute("value") or "").strip()
+            return bool(entered_value)
+        except Exception:
+            return True
+
     def _click_first_if_present(self, driver, by, element_ids: Sequence[str]) -> bool:
         """Clicks the first visible+enabled element from a list of candidate IDs."""
         for element_id in element_ids:
@@ -528,7 +597,10 @@ class MoodleCrawler:
             for element in candidates:
                 try:
                     if element.is_displayed() and element.is_enabled():
-                        element.click()
+                        try:
+                            element.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", element)
                         return True
                 except Exception:
                     continue
