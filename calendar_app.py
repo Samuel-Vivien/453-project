@@ -14,8 +14,9 @@ from pathlib import Path
 import re
 import tkinter as tk
 from tkinter import ttk
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import webbrowser
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from moodle_crawler import MoodleCrawler, MoodleEvent
 
@@ -74,6 +75,9 @@ class CalendarApp(tk.Tk):
 
         self._build_layout()
         self._load_items()
+        removed_count = self._dedupe_existing_import_items()
+        if removed_count:
+            self._save_items()
         self._refresh_calendar()
         self._refresh_item_list()
 
@@ -589,6 +593,7 @@ class CalendarApp(tk.Tk):
         removed_count = self._dedupe_existing_import_items()
         existing_signatures = set()
         existing_legacy_signatures = set()
+        existing_source_signatures = set()
         for day_key, day_items in self.items_by_day.items():
             for item in day_items:
                 signature = (
@@ -604,6 +609,10 @@ class CalendarApp(tk.Tk):
                         item.time_label.strip().lower(),
                     )
                 )
+                source_url = self._extract_source_url(item.details)
+                source_signature = self._source_signature(day_key, source_url)
+                if source_signature is not None:
+                    existing_source_signatures.add(source_signature)
 
         added_count = 0
         skipped_count = 0
@@ -624,7 +633,12 @@ class CalendarApp(tk.Tk):
                 self._strip_class_title_prefix(title).lower(),
                 event.time_label.strip().lower(),
             )
-            if normalized_signature in existing_signatures or legacy_signature in existing_legacy_signatures:
+            source_signature = self._source_signature(date_key, event.source_url)
+            if (
+                normalized_signature in existing_signatures
+                or legacy_signature in existing_legacy_signatures
+                or (source_signature is not None and source_signature in existing_source_signatures)
+            ):
                 existing_item = self._find_item_by_signature(
                     date_key,
                     title=title,
@@ -635,6 +649,11 @@ class CalendarApp(tk.Tk):
                         date_key,
                         title=title,
                         time_label=event.time_label,
+                    )
+                if existing_item is None and source_signature is not None:
+                    existing_item = self._find_item_by_source_signature(
+                        date_key,
+                        source_url=event.source_url,
                     )
                 if existing_item is not None:
                     if existing_item.title != title and self._is_better_event_title(existing_item.title, title):
@@ -661,6 +680,8 @@ class CalendarApp(tk.Tk):
             self.next_item_id += 1
             existing_signatures.add(normalized_signature)
             existing_legacy_signatures.add(legacy_signature)
+            if source_signature is not None:
+                existing_source_signatures.add(source_signature)
             added_count += 1
 
         if added_count or updated_count or removed_count:
@@ -686,6 +707,18 @@ class CalendarApp(tk.Tk):
                 return item
         return None
 
+    def _find_item_by_source_signature(self, date_key: str, source_url: str) -> Optional[CalendarItem]:
+        """Finds an existing item by normalized same-day source URL."""
+        target_signature = self._source_signature(date_key, source_url)
+        if target_signature is None:
+            return None
+        for item in self.items_by_day.get(date_key, []):
+            item_source = self._extract_source_url(item.details)
+            item_signature = self._source_signature(date_key, item_source)
+            if item_signature == target_signature:
+                return item
+        return None
+
     def _try_upgrade_item_source_url(self, item: CalendarItem, new_source_url: str) -> bool:
         """Upgrades an item's Source URL when import provides a better assignment link."""
         new_source = new_source_url.strip()
@@ -706,6 +739,72 @@ class CalendarApp(tk.Tk):
             if trimmed.lower().startswith("source:"):
                 return trimmed.split(":", 1)[1].strip()
         return ""
+
+    def _source_signature(self, date_key: str, source_url: str) -> Optional[Tuple[str, str]]:
+        """Builds a same-day source key used to collapse duplicate imported items."""
+        normalized_source = self._normalize_source_url_for_match(source_url)
+        if not normalized_source:
+            return None
+        return date_key, normalized_source
+
+    def _normalize_source_url_for_match(self, source_url: str) -> str:
+        """Canonicalizes Moodle source URLs so equivalent links compare equal."""
+        candidate = source_url.strip()
+        if not candidate:
+            return ""
+        if not candidate.lower().startswith(("http://", "https://")):
+            candidate = f"https://{candidate}"
+
+        parsed = urlparse(candidate)
+        if not parsed.netloc:
+            return ""
+
+        path = parsed.path or "/"
+        lowered_path = path.lower()
+        query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        query_map = {key.lower(): value for key, value in query_pairs}
+
+        if lowered_path == "/mod/assign/view.php":
+            assign_id = (query_map.get("id") or query_map.get("cmid") or "").strip()
+            canonical_pairs = [("id", assign_id)] if assign_id else []
+            normalized_query = urlencode(canonical_pairs, doseq=True)
+            return urlunparse(
+                (
+                    parsed.scheme.lower(),
+                    parsed.netloc.lower(),
+                    path,
+                    "",
+                    normalized_query,
+                    "",
+                )
+            )
+
+        if lowered_path == "/mod/quiz/view.php":
+            quiz_id = (query_map.get("id") or query_map.get("cmid") or "").strip()
+            canonical_pairs = [("id", quiz_id)] if quiz_id else []
+            normalized_query = urlencode(canonical_pairs, doseq=True)
+            return urlunparse(
+                (
+                    parsed.scheme.lower(),
+                    parsed.netloc.lower(),
+                    path,
+                    "",
+                    normalized_query,
+                    "",
+                )
+            )
+
+        normalized_query = urlencode(sorted(query_pairs), doseq=True)
+        return urlunparse(
+            (
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                path,
+                "",
+                normalized_query,
+                "",
+            )
+        )
 
     def _replace_source_url(self, details: str, source_url: str) -> str:
         """Replaces existing Source line or appends one when missing."""
@@ -739,7 +838,7 @@ class CalendarApp(tk.Tk):
         return False
 
     def _dedupe_existing_import_items(self) -> int:
-        """Collapses existing same-day same-time duplicate rows caused by format migrations."""
+        """Collapses existing same-day duplicates by title/time and by normalized source URL."""
         removed_count = 0
         for day_key, items in list(self.items_by_day.items()):
             best_by_key: Dict[tuple[str, str], CalendarItem] = {}
@@ -754,7 +853,22 @@ class CalendarApp(tk.Tk):
                     continue
                 best_by_key[key] = self._choose_preferred_import_item(current, item)
 
-            deduped_items = list(best_by_key.values())
+            title_deduped_items = list(best_by_key.values())
+            best_by_source_key: Dict[str, CalendarItem] = {}
+            no_source_items: List[CalendarItem] = []
+            for item in title_deduped_items:
+                source_key = self._normalize_source_url_for_match(self._extract_source_url(item.details))
+                if not source_key:
+                    no_source_items.append(item)
+                    continue
+                current = best_by_source_key.get(source_key)
+                if current is None:
+                    best_by_source_key[source_key] = item
+                    continue
+                best_by_source_key[source_key] = self._choose_preferred_import_item(current, item)
+
+            deduped_items = list(best_by_source_key.values()) + no_source_items
+            deduped_items.sort(key=lambda item: item.item_id)
             removed_count += max(0, len(items) - len(deduped_items))
             self.items_by_day[day_key] = deduped_items
         return removed_count
