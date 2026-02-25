@@ -12,14 +12,29 @@ Single-window desktop calendar built with Python + Tkinter.
 
 ## Install (One Click)
 
+### Windows
+
 1. Double-click `Install Calendar App.bat`.
 2. After installation finishes, double-click `Run Calendar App.bat`.
+
+### macOS
+
+1. Double-click `Install Calendar App.command`.
+2. After installation finishes, double-click `Run Calendar App.command`.
+3. If macOS blocks double-click execution, run this once in Terminal from the project folder:
+   - `chmod +x "Install Calendar App.command" "Run Calendar App.command"`
+   - then run `./Install\ Calendar\ App.command`
 
 ## Run (Manual)
 
 ```powershell
 py -3 -m pip install -r requirements.txt
 py -3 calendar_app.py
+```
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 calendar_app.py
 ```
 
 ## Notes

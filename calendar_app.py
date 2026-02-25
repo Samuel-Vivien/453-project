@@ -514,32 +514,75 @@ class CalendarApp(tk.Tk):
                 password=password,
             )
         except Exception as exc:
-            message = f"Unexpected import error: {exc}"
-            self.moodle_info_var.set(message)
-            self._set_status(message)
-            self._show_error(message, "Moodle Import Error")
+            print(f"Moodle import exception: {exc}")
+            safe_message = self._sanitize_user_message("Unexpected import error. Please try again.")
+            self.moodle_info_var.set(safe_message)
+            self._set_status(safe_message)
+            self._show_error(safe_message, "Moodle Import Error")
             return
 
+        safe_message = self._sanitize_user_message(message)
         if login_required:
-            self.moodle_info_var.set(message)
-            self._set_status(message)
-            self._show_error(message, "Moodle Login Error")
+            self.moodle_info_var.set(safe_message)
+            self._set_status(safe_message)
+            self._show_error(safe_message, "Moodle Login Error")
             self.moodle_username_entry.focus_set()
             return
 
         if not events:
-            self.moodle_info_var.set(message)
-            self._set_status(message)
-            self._show_error(message, "Moodle Import Error")
+            self.moodle_info_var.set(safe_message)
+            self._set_status(safe_message)
+            self._show_error(safe_message, "Moodle Import Error")
             return
 
         added_count, skipped_count, updated_count = self._store_moodle_events(events)
         self._refresh_calendar()
         self._refresh_item_list()
-        self.moodle_info_var.set(message)
+        self.moodle_info_var.set(safe_message)
         self._set_status(
             f"Imported {added_count} Moodle items. Updated {updated_count} existing items. Skipped {skipped_count} duplicates."
         )
+
+    def _sanitize_user_message(self, message: str) -> str:
+        """Converts technical exceptions into clean, user-facing status text."""
+        clean_message = (message or "").strip()
+        if not clean_message:
+            return "An error occurred. Please try again."
+
+        lowered = clean_message.lower()
+        if any(token in lowered for token in ("invalid element state", "stacktrace", "session info", "webdriver")):
+            return (
+                "Moodle sign-in could not be completed automatically. "
+                "Please try again and complete login in the opened browser window."
+            )
+
+        if "browser sso login failed" in lowered:
+            return "Moodle sign-in failed. Please verify credentials and try again."
+
+        if "could not start browser automation for sso login" in lowered:
+            return "Could not start browser sign-in. Make sure Edge or Chrome is installed, then try again."
+
+        sanitized_lines: List[str] = []
+        for raw_line in clean_message.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            line_lower = line.lower()
+            if "stacktrace" in line_lower or "symbols not available" in line_lower:
+                continue
+            if line_lower.startswith("0x"):
+                continue
+            if line_lower.startswith("traceback"):
+                continue
+            sanitized_lines.append(line)
+
+        if not sanitized_lines:
+            return "An error occurred. Please try again."
+
+        sanitized = " ".join(sanitized_lines)
+        if len(sanitized) > 320:
+            return f"{sanitized[:317].rstrip()}..."
+        return sanitized
 
     def _store_moodle_events(self, events: List[MoodleEvent]) -> tuple[int, int, int]:
         """Adds parsed Moodle events and upgrades duplicate source URLs when possible."""
