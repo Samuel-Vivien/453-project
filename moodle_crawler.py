@@ -306,6 +306,7 @@ class MoodleCrawler:
     _MANUAL_PASSWORD_WAIT_SECONDS = 60
     _MFA_WAIT_SECONDS = 60
     _MAX_FUTURE_DAYS = 730
+    _EXTRA_ASSIGNMENT_PAGE_BUDGET = 120
 
     def __init__(self, max_pages: int = 60, timeout_seconds: int = 15) -> None:
         """Configures crawl depth and HTTP timeout behavior."""
@@ -730,6 +731,14 @@ class MoodleCrawler:
                 if self._canonical_url(link) not in visited:
                     queue.append(link)
 
+        self._expand_with_assignment_pages_driver(
+            driver=driver,
+            root_url=start_url,
+            root_host=root_host,
+            pages=pages,
+            visited=visited,
+            max_extra_pages=self._EXTRA_ASSIGNMENT_PAGE_BUDGET,
+        )
         return pages
 
     def _build_opener(self):
@@ -867,7 +876,142 @@ class MoodleCrawler:
                 if self._canonical_url(link) not in visited:
                     queue.append(link)
 
+        self._expand_with_assignment_pages(
+            opener=opener,
+            root_url=start_url,
+            root_host=urlparse(start_url).netloc.lower(),
+            pages=pages,
+            visited=visited,
+            max_extra_pages=self._EXTRA_ASSIGNMENT_PAGE_BUDGET,
+        )
         return pages
+
+    def _expand_with_assignment_pages(
+        self,
+        opener,
+        root_url: str,
+        root_host: str,
+        pages: List[Tuple[str, str]],
+        visited: Set[str],
+        max_extra_pages: int,
+    ) -> None:
+        """Fetches assignment pages discovered from crawled pages to improve coverage."""
+        remaining_budget = max_extra_pages
+        while remaining_budget > 0:
+            targets = self._collect_assignment_targets_from_pages(pages, root_url, visited)
+            if not targets:
+                return
+
+            fetched_any = False
+            for target_url in targets:
+                if remaining_budget <= 0:
+                    break
+                canonical_target = self._canonical_url(target_url)
+                if canonical_target in visited:
+                    continue
+                visited.add(canonical_target)
+
+                try:
+                    html, final_url = self._fetch_html(opener, target_url)
+                except (HTTPError, URLError, TimeoutError, ValueError):
+                    continue
+                if urlparse(final_url).netloc.lower() != root_host:
+                    continue
+                if self._requires_login(html, final_url, root_url):
+                    continue
+
+                pages.append((final_url, html))
+                visited.add(self._canonical_url(final_url))
+                remaining_budget -= 1
+                fetched_any = True
+
+            if not fetched_any:
+                return
+
+    def _expand_with_assignment_pages_driver(
+        self,
+        driver,
+        root_url: str,
+        root_host: str,
+        pages: List[Tuple[str, str]],
+        visited: Set[str],
+        max_extra_pages: int,
+    ) -> None:
+        """Visits discovered assignment pages in an authenticated webdriver session."""
+        remaining_budget = max_extra_pages
+        while remaining_budget > 0:
+            targets = self._collect_assignment_targets_from_pages(pages, root_url, visited)
+            if not targets:
+                return
+
+            fetched_any = False
+            for target_url in targets:
+                if remaining_budget <= 0:
+                    break
+                canonical_target = self._canonical_url(target_url)
+                if canonical_target in visited:
+                    continue
+                visited.add(canonical_target)
+
+                try:
+                    driver.get(target_url)
+                    self._wait_for_document_ready(driver)
+                except Exception:
+                    continue
+
+                final_url = driver.current_url
+                if urlparse(final_url).netloc.lower() != root_host:
+                    continue
+                html = driver.page_source or ""
+                if self._requires_login(html, final_url, root_url):
+                    continue
+
+                pages.append((final_url, html))
+                visited.add(self._canonical_url(final_url))
+                remaining_budget -= 1
+                fetched_any = True
+
+            if not fetched_any:
+                return
+
+    def _collect_assignment_targets_from_pages(
+        self,
+        pages: List[Tuple[str, str]],
+        root_url: str,
+        visited: Set[str],
+    ) -> List[str]:
+        """Collects unseen assignment URLs from crawled page content."""
+        root_host = urlparse(root_url).netloc.lower()
+        targets: List[str] = []
+        seen_targets: Set[str] = set()
+
+        for page_url, html in pages:
+            anchors = self._extract_anchor_links(page_url, html)
+            for anchor in anchors:
+                if not self._is_assignment_page_url(anchor.href):
+                    continue
+                normalized = self._to_submission_page_url(anchor.href)
+                parsed = urlparse(normalized)
+                if parsed.netloc.lower() != root_host:
+                    continue
+                canonical = self._canonical_url(normalized)
+                if canonical in visited or canonical in seen_targets:
+                    continue
+                seen_targets.add(canonical)
+                targets.append(normalized)
+
+            for submission_link in self._extract_submission_action_links_from_html(page_url, html, root_host):
+                if not self._is_assignment_page_url(submission_link):
+                    continue
+                normalized = self._to_submission_page_url(submission_link)
+                canonical = self._canonical_url(normalized)
+                if canonical in visited or canonical in seen_targets:
+                    continue
+                seen_targets.add(canonical)
+                targets.append(normalized)
+
+        targets.sort(key=self._crawl_link_priority)
+        return targets
 
     def _extract_candidate_links(self, base_url: str, html: str, root_url: str) -> List[str]:
         """Returns same-site links that likely lead to relevant Moodle content."""
@@ -890,6 +1034,9 @@ class MoodleCrawler:
                 continue
             links.append(absolute)
 
+        # Moodle "Add submission" buttons may be rendered outside anchor tags.
+        links.extend(self._extract_submission_action_links_from_html(base_url, html, root_host))
+
         # Preserve order while removing duplicates.
         unique_links: List[str] = []
         seen: Set[str] = set()
@@ -902,18 +1049,48 @@ class MoodleCrawler:
         unique_links.sort(key=self._crawl_link_priority)
         return unique_links
 
+    def _extract_submission_action_links_from_html(
+        self,
+        base_url: str,
+        html: str,
+        root_host: str = "",
+    ) -> List[str]:
+        """Extracts assignment submission URLs from raw Moodle HTML/button/script content."""
+        pattern = re.compile(
+            r"(?P<url>(?:https?://[^\"'<>\s]+)?/mod/assign/view\.php\?[^\"'<>\s]*"
+            r"(?:action=editsubmission|action=submit)[^\"'<>\s]*)",
+            re.IGNORECASE,
+        )
+
+        links: List[str] = []
+        seen: Set[str] = set()
+        for match in pattern.finditer(html):
+            raw_url = unescape(match.group("url")).strip()
+            raw_url = raw_url.strip("\"'<>")
+            raw_url = raw_url.rstrip(");,")
+            absolute = urljoin(base_url, raw_url)
+            parsed = urlparse(absolute)
+            if root_host and parsed.netloc.lower() != root_host.lower():
+                continue
+            canonical = self._canonical_url(absolute)
+            if canonical in seen:
+                continue
+            seen.add(canonical)
+            links.append(absolute)
+        return links
+
     def _crawl_link_priority(self, link: str) -> Tuple[int, str]:
-        """Sort key to crawl likely event-bearing module pages before generic course pages."""
+        """Sort key to discover course coverage first, then activity detail pages."""
         lowered = link.lower()
-        if "/mod/assign/" in lowered:
-            return (0, lowered)
-        if "/mod/quiz/" in lowered:
-            return (1, lowered)
-        if "/calendar/view.php" in lowered:
-            return (2, lowered)
         if "/course/view.php" in lowered:
-            return (3, lowered)
+            return (0, lowered)
+        if "/calendar/view.php" in lowered:
+            return (1, lowered)
         if "/my/" in lowered:
+            return (2, lowered)
+        if "/mod/assign/" in lowered:
+            return (3, lowered)
+        if "/mod/quiz/" in lowered:
             return (4, lowered)
         return (5, lowered)
 
@@ -928,6 +1105,9 @@ class MoodleCrawler:
         lines = [self._normalize_whitespace(line) for line in plain_text.splitlines()]
         lines = [line for line in lines if line]
         page_links = self._extract_anchor_links(page_url, html)
+        page_has_assignment_links = any(self._is_assignment_page_url(anchor.href) for anchor in page_links)
+        if not page_has_assignment_links:
+            page_has_assignment_links = bool(self._extract_submission_action_links_from_html(page_url, html))
         class_label = self._extract_class_label(page_url, page_links, lines)
         assignment_index = assignment_index or {}
 
@@ -947,6 +1127,10 @@ class MoodleCrawler:
             if category is None:
                 local_context = " ".join(lines[max(0, index - 1) : min(len(lines), index + 2)])
                 category = self._detect_category(local_context, page_url)
+            if category is None and page_has_assignment_links:
+                local_context = " ".join(lines[max(0, index - 1) : min(len(lines), index + 2)])
+                if self._looks_date_related(local_context.lower()):
+                    category = "Homework"
             if category is None:
                 continue
 
@@ -972,9 +1156,6 @@ class MoodleCrawler:
             raw_title = self._derive_title(lines, index, category)
             if not raw_title:
                 raw_title = f"{category} item"
-            if category == "Homework" and self._is_low_confidence_homework_title(raw_title):
-                # Generic completion rows (for example "Mark as done") create bad link mappings.
-                continue
 
             source_url = page_url
             if category == "Homework":
@@ -1001,11 +1182,25 @@ class MoodleCrawler:
 
             title = raw_title
             if category == "Homework":
+                low_confidence_title = self._is_low_confidence_homework_title(raw_title)
+                if low_confidence_title and source_url == page_url:
+                    # Skip generic homework rows unless they were confidently mapped to an assignment page.
+                    continue
+
                 resolved_class_label = class_label
                 info = assignment_index.get(self._canonical_url(self._to_submission_page_url(source_url)))
                 if info is not None and info.class_label:
                     resolved_class_label = info.class_label
-                title = self._with_class_label(raw_title, resolved_class_label)
+
+                base_title = raw_title
+                if self._is_low_confidence_homework_title(base_title) and info is not None:
+                    indexed_title = self._clean_assignment_title(info.title, resolved_class_label)
+                    if indexed_title and not self._is_low_confidence_homework_title(indexed_title):
+                        base_title = indexed_title
+
+                if self._is_low_confidence_homework_title(base_title):
+                    base_title = "Homework item"
+                title = self._with_class_label(base_title, resolved_class_label)
 
             event_key = (
                 event_date.isoformat(),
@@ -1075,6 +1270,22 @@ class MoodleCrawler:
                         existing.class_label = class_label
                     if (not existing.title or existing.title.lower().endswith("item")) and anchor_title:
                         existing.title = anchor_title
+            for submission_link in self._extract_submission_action_links_from_html(page_url, html):
+                if not self._is_assignment_page_url(submission_link):
+                    continue
+                normalized_link = self._to_submission_page_url(submission_link)
+                key = self._canonical_url(normalized_link)
+                existing = index.get(key)
+                if existing is None:
+                    index[key] = _AssignmentPageInfo(
+                        url=normalized_link,
+                        title="Homework item",
+                        due_date=None,
+                        due_time="",
+                        class_label=class_label,
+                    )
+                elif not existing.class_label and class_label:
+                    existing.class_label = class_label
 
             if not self._is_assignment_page_url(page_url):
                 continue
