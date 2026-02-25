@@ -1724,9 +1724,9 @@ class MoodleCrawler:
         return score
 
     def _filter_event_date_window(self, events: List[MoodleEvent]) -> List[MoodleEvent]:
-        """Drops events far outside the active academic window to reduce false positives."""
+        """Keeps only events from today onward and within the forward import window."""
         today = date.today()
-        min_date = today - timedelta(days=self._MAX_PAST_DAYS)
+        min_date = today
         max_date = today + timedelta(days=self._MAX_FUTURE_DAYS)
         return [event for event in events if min_date <= event.event_date <= max_date]
 
