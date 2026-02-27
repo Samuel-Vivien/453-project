@@ -915,8 +915,11 @@ class CalendarApp(tk.Tk):
         if candidate_is_assign and current_is_assign:
             current_has_action = "action=editsubmission" in current or "action=submit" in current
             candidate_has_action = "action=editsubmission" in candidate or "action=submit" in candidate
-            if candidate_has_action and not current_has_action:
+            if current_has_action and not candidate_has_action:
+                # Prefer stable assignment id pages over submission-action variants.
                 return True
+            if candidate_has_action and not current_has_action:
+                return False
         if candidate_is_quiz and current_is_quiz:
             current_is_view = "/mod/quiz/view.php" in current
             candidate_is_view = "/mod/quiz/view.php" in candidate

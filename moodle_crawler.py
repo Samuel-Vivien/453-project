@@ -1652,33 +1652,29 @@ class MoodleCrawler:
         return ""
 
     def _to_submission_page_url(self, assignment_url: str) -> str:
-        """Normalizes assignment URLs to submission-page variants."""
+        """Normalizes assignment URLs to assignment id pages (no action query)."""
         if not self._is_assignment_page_url(assignment_url):
             return assignment_url
 
         parsed = urlparse(assignment_url)
         existing_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-        query_pairs: List[Tuple[str, str]] = []
-        has_action = False
-        for key, value in existing_pairs:
-            if key.lower() == "action":
-                has_action = True
-                if value.strip().lower() in {"editsubmission", "submit"}:
-                    query_pairs.append((key, value))
-                continue
-            query_pairs.append((key, value))
+        query_map = {key.lower(): value for key, value in existing_pairs}
+        assignment_id = (query_map.get("id") or query_map.get("cmid") or "").strip()
 
-        if not has_action:
-            query_pairs.append(("action", "editsubmission"))
-        elif not any(k.lower() == "action" for k, _ in query_pairs):
-            query_pairs.append(("action", "editsubmission"))
+        if assignment_id:
+            query_pairs: List[Tuple[str, str]] = [("id", assignment_id)]
+            target_path = "/mod/assign/view.php"
+        else:
+            # Fall back to original path/query when no activity id is available.
+            query_pairs = [(key, value) for key, value in existing_pairs if key.lower() != "action"]
+            target_path = parsed.path
 
         normalized_query = urlencode(query_pairs, doseq=True)
         return urlunparse(
             (
                 parsed.scheme,
                 parsed.netloc,
-                parsed.path,
+                target_path,
                 parsed.params,
                 normalized_query,
                 parsed.fragment,
