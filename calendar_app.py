@@ -208,7 +208,7 @@ class CalendarApp(tk.Tk):
         )
 
         self.moodle_info_var = tk.StringVar(
-            value="Imports homework, quiz, and test dates from Moodle text content."
+            value="Imports homework/assignment due dates from Moodle text content."
         )
         ttk.Label(
             moodle_frame,

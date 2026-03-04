@@ -210,7 +210,7 @@ class _LoginFormParser(HTMLParser):
 
 
 class MoodleCrawler:
-    """Crawls Moodle pages and extracts homework, quiz, and test dates."""
+    """Crawls Moodle pages and extracts homework/assignment due dates."""
 
     _TIME_PATTERN = re.compile(r"\b(\d{1,2}(?::\d{2})?\s*(?:AM|PM|am|pm))\b")
     _TIME_ONLY_PATTERN = re.compile(r"^(?:\d{1,2}(?::\d{2})?\s*(?:AM|PM)|\d{1,2}\s*(?:AM|PM))$", re.IGNORECASE)
@@ -232,13 +232,10 @@ class MoodleCrawler:
     _SLASH_PATTERN = re.compile(r"\b(?P<month>\d{1,2})/(?P<day>\d{1,2})/(?P<year>\d{2,4})\b")
     _CATEGORY_KEYWORDS = {
         "Homework": ("homework", "assignment", "assign"),
-        "Quiz": ("quiz",),
-        "Test": ("test", "exam", "midterm", "final"),
     }
     _MOODLE_PATH_HINTS = (
         "/course/view.php",
         "/mod/assign/",
-        "/mod/quiz/",
         "/mod/page/",
         "/calendar/view.php",
         "/my/",
@@ -360,7 +357,7 @@ class MoodleCrawler:
         deduped = self._dedupe_events(events)
         deduped = self._filter_event_date_window(deduped)
         if not deduped:
-            return [], False, "No homework/quiz/test dates were detected on the scanned Moodle pages."
+            return [], False, "No homework/assignment due dates were detected on the scanned Moodle pages."
         return deduped, False, f"Detected {len(deduped)} dated Moodle items."
 
     def _crawl_through_external_sso(
@@ -401,7 +398,7 @@ class MoodleCrawler:
         deduped = self._dedupe_events(events)
         deduped = self._filter_event_date_window(deduped)
         if not deduped:
-            return [], False, f"Signed in via {browser_name}, but no homework/quiz/test dates were detected."
+            return [], False, f"Signed in via {browser_name}, but no homework/assignment due dates were detected."
         return deduped, False, f"Detected {len(deduped)} dated Moodle items via {browser_name} SSO session."
 
     def _import_selenium(self) -> Optional[Dict[str, object]]:
@@ -1090,9 +1087,7 @@ class MoodleCrawler:
             return (2, lowered)
         if "/mod/assign/" in lowered:
             return (3, lowered)
-        if "/mod/quiz/" in lowered:
-            return (4, lowered)
-        return (5, lowered)
+        return (4, lowered)
 
     def _extract_events_from_page(
         self,
@@ -1133,6 +1128,9 @@ class MoodleCrawler:
                     category = "Homework"
             if category is None:
                 continue
+            if category != "Homework":
+                # Quiz/test import is intentionally disabled.
+                continue
 
             parsed_context = ""
             parsed_date: Optional[Tuple[date, str]] = None
@@ -1158,27 +1156,15 @@ class MoodleCrawler:
                 raw_title = f"{category} item"
 
             source_url = page_url
-            if category == "Homework":
-                source_url = self._resolve_homework_submission_url(
-                    page_url,
-                    page_links,
-                    raw_title,
-                    event_date,
-                    time_label,
-                    class_label,
-                    assignment_index,
-                )
-            elif category in {"Quiz", "Test"}:
-                source_url = self._resolve_quiz_test_url(
-                    page_url,
-                    page_links,
-                    raw_title,
-                    category,
-                    event_date,
-                    time_label,
-                    class_label,
-                    assignment_index,
-                )
+            source_url = self._resolve_homework_submission_url(
+                page_url,
+                page_links,
+                raw_title,
+                event_date,
+                time_label,
+                class_label,
+                assignment_index,
+            )
 
             title = raw_title
             if category == "Homework":
@@ -1524,15 +1510,11 @@ class MoodleCrawler:
         return ""
 
     def _is_relevant_schedule_context(self, category: str, text: str) -> bool:
-        """Keeps only date lines relevant to due/test/quiz scheduling."""
+        """Keeps only date lines relevant to homework due scheduling."""
         lowered = text.lower()
         if category == "Homework":
             return any(token in lowered for token in ("due", "closes", "closed", "deadline", "close:"))
-        if category == "Quiz":
-            return any(token in lowered for token in ("quiz", "due", "closes", "deadline", "exam", "test", "date"))
-        if category == "Test":
-            return any(token in lowered for token in ("test", "exam", "midterm", "final", "due", "date", "deadline"))
-        return True
+        return False
 
     def _is_low_confidence_homework_title(self, title: str) -> bool:
         """Returns True when homework title text is too generic for reliable link matching."""
@@ -1784,7 +1766,7 @@ class MoodleCrawler:
         return parser.get_text()
 
     def _detect_category(self, text: str, source_url: str) -> Optional[str]:
-        """Classifies one text segment as Homework, Quiz, or Test."""
+        """Classifies one text segment as Homework when cues are present."""
         lowered = text.lower()
         for category, keywords in self._CATEGORY_KEYWORDS.items():
             if any(keyword in lowered for keyword in keywords):
@@ -1793,8 +1775,6 @@ class MoodleCrawler:
         source_hint = source_url.lower()
         if "/mod/assign/" in source_hint and self._looks_date_related(lowered):
             return "Homework"
-        if "/mod/quiz/" in source_hint and self._looks_date_related(lowered):
-            return "Quiz"
         return None
 
     def _extract_first_date(self, text: str) -> Optional[Tuple[date, str]]:
@@ -1939,7 +1919,7 @@ class MoodleCrawler:
         return left
 
     def _source_quality_score(self, source_url: str) -> int:
-        """Scores source URLs so module pages beat generic course pages."""
+        """Scores source URLs so assignment pages beat generic course pages."""
         lowered = source_url.lower()
         score = 0
         if "/course/view.php" in lowered:
@@ -1948,10 +1928,6 @@ class MoodleCrawler:
             score += 40
         if "action=editsubmission" in lowered or "action=submit" in lowered:
             score += 15
-        if "/mod/quiz/view.php" in lowered:
-            score += 35
-        elif "/mod/quiz/" in lowered:
-            score += 20
         return score
 
     def _filter_event_date_window(self, events: List[MoodleEvent]) -> List[MoodleEvent]:

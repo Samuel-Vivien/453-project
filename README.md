@@ -23,9 +23,23 @@ Single-window desktop calendar built with Python + Tkinter.
 1. Double-click `Install Calendar App.command`.
 2. After installation finishes, double-click `Run Calendar App.command`.
 3. If macOS blocks double-click execution, run this once in Terminal from the project folder:
-   - `chmod +x "Install Calendar App.command" "Run Calendar App.command"`
+   - `chmod +x "Install Calendar App.command" "Run Calendar App.command" "Uninstall Calendar App.command"`
    - then run `./Install\ Calendar\ App.command`
 4. The launcher activates `.venv` automatically and deactivates it when the app closes.
+
+## Uninstall (One Click)
+
+### Windows
+
+1. Double-click `Uninstall Calendar App.bat`.
+2. It removes `.venv` and Python cache files.
+3. It asks whether to also delete `calendar_items.json`.
+
+### macOS
+
+1. Double-click `Uninstall Calendar App.command`.
+2. It removes `.venv` and Python cache files.
+3. It asks whether to also delete `calendar_items.json`.
 
 ## Run (Manual)
 
@@ -44,8 +58,8 @@ python3 calendar_app.py
 - Click a day on the month grid to load its items.
 - Use the right-side `View / Edit Item` section to add or update items.
 - Item count for each day is shown on the day button as `(count)`.
-- Use `Moodle Import` to crawl a Moodle URL and auto-import homework, quiz, and test dates.
-- Imported homework links prefer assignment submission pages, and imported quiz/test links prefer their activity module pages.
+- Use `Moodle Import` to crawl a Moodle URL and auto-import homework/assignment due dates.
+- Imported homework links prefer assignment submission pages.
 - Imported homework titles include course/class context (for example `[Course] Assignment ...`) to reduce ambiguity.
 - If the Moodle page requires authentication, enter username/password in the same panel and import again.
 - For external SSO (for example Microsoft login), install Selenium once (`py -3 -m pip install selenium`) so the app can automate sign-in and import dates.
