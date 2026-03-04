@@ -7,7 +7,7 @@ removing multiple calendar items per day without opening extra windows.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import date
+from datetime import date, timedelta
 import calendar
 import json
 from pathlib import Path
@@ -66,8 +66,14 @@ class CalendarApp(tk.Tk):
         self._url_tag_to_link: Dict[str, str] = {}
         self._error_window: Optional[tk.Toplevel] = None
         self._error_text: Optional[tk.Text] = None
+        self._due_notice_window: Optional[tk.Toplevel] = None
+        self._due_notice_text: Optional[tk.Text] = None
+        self._last_due_notice_day: Optional[date] = None
+        self._last_due_notice_target: Optional[date] = None
+        self._due_reminder_after_id: Optional[str] = None
         self._clear_all_confirm_pending = False
         self._clear_all_reset_after_id: Optional[str] = None
+        self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
         self.style = ttk.Style(self)
         self.style.configure("SelectedDay.TButton", foreground="#0a4f9c")
@@ -80,6 +86,8 @@ class CalendarApp(tk.Tk):
         if removed_count:
             self._save_items()
         self._refresh_calendar()
+        self._refresh_upcoming_due_notice(update_status=True)
+        self._schedule_due_reminder_check(initial_delay_ms=300)
 
     def _build_layout(self) -> None:
         """Creates and arranges all widgets in the single main window."""
@@ -341,6 +349,7 @@ class CalendarApp(tk.Tk):
         self.items_by_day.setdefault(key, []).append(new_item)
         self._save_items()
         self._refresh_calendar()
+        self._refresh_upcoming_due_notice()
         self._set_status(f"Added item for {key}")
 
     def _update_item(self) -> None:
@@ -367,6 +376,7 @@ class CalendarApp(tk.Tk):
 
         self._save_items()
         self._refresh_calendar()
+        self._refresh_upcoming_due_notice()
         self.item_list.selection_set(selected_index)
         self._set_status(f"Updated item for {key}")
 
@@ -389,6 +399,7 @@ class CalendarApp(tk.Tk):
 
         self._save_items()
         self._refresh_calendar()
+        self._refresh_upcoming_due_notice()
         self._set_status(f"Removed '{removed_item.title}' from {key}")
 
     def _clear_editor(self, keep_status: bool = False) -> None:
@@ -427,6 +438,7 @@ class CalendarApp(tk.Tk):
         self._reset_clear_all_confirmation()
         self._save_items()
         self._refresh_calendar()
+        self._refresh_upcoming_due_notice()
         self._clear_editor(keep_status=True)
         self._set_status(f"Cleared {item_count} items across {day_count} day(s).")
 
@@ -541,6 +553,7 @@ class CalendarApp(tk.Tk):
 
         added_count, skipped_count, updated_count = self._store_moodle_events(events)
         self._refresh_calendar()
+        self._refresh_upcoming_due_notice()
         self.moodle_info_var.set(safe_message)
         self._set_status(
             f"Imported {added_count} Moodle items. Updated {updated_count} existing items. Skipped {skipped_count} duplicates."
@@ -951,6 +964,169 @@ class CalendarApp(tk.Tk):
     def _set_status(self, message: str) -> None:
         """Writes a short message into the in-window status bar."""
         self.status_var.set(message)
+
+    def _refresh_upcoming_due_notice(self, update_status: bool = False, notify_popup: bool = False) -> None:
+        """Builds due-date notice text and optionally evaluates popup reminder timing."""
+        notice_text, first_due_date, window_item_count = self._build_upcoming_due_notice()
+
+        if notify_popup:
+            self._maybe_show_due_reminder_popup(notice_text, first_due_date)
+
+        if not update_status:
+            return
+
+        if first_due_date is None:
+            self._set_status("No upcoming due dates from today onward.")
+            return
+
+        due_label = first_due_date.strftime("%A, %b %d, %Y")
+        self._set_status(
+            f"Next due date: {due_label}. {window_item_count} item(s) due within 3 days of that date."
+        )
+
+    def _maybe_show_due_reminder_popup(self, notice_text: str, first_due_date: Optional[date]) -> None:
+        """Shows reminders every other day before the next due date while app is open."""
+        if first_due_date is None:
+            return
+
+        today = date.today()
+        days_until_due = (first_due_date - today).days
+        if days_until_due <= 0:
+            # "Leading up" reminders are only before the due day.
+            return
+        if days_until_due % 2 != 0:
+            return
+
+        if self._last_due_notice_day == today and self._last_due_notice_target == first_due_date:
+            return
+
+        self._show_due_notice_popup(notice_text)
+        self._last_due_notice_day = today
+        self._last_due_notice_target = first_due_date
+
+    def _schedule_due_reminder_check(self, initial_delay_ms: int = 3_600_000) -> None:
+        """Schedules the next periodic due-reminder check while app stays open."""
+        if self._due_reminder_after_id is not None:
+            try:
+                self.after_cancel(self._due_reminder_after_id)
+            except ValueError:
+                pass
+        self._due_reminder_after_id = self.after(initial_delay_ms, self._run_due_reminder_check)
+
+    def _run_due_reminder_check(self) -> None:
+        """Performs one periodic reminder cycle and schedules the next cycle."""
+        self._due_reminder_after_id = None
+        self._refresh_upcoming_due_notice(notify_popup=True)
+        self._schedule_due_reminder_check()
+
+    def _build_upcoming_due_notice(self) -> tuple[str, Optional[date], int]:
+        """Builds upcoming due-date text using the nearest date and a three-day window."""
+        upcoming_by_day: Dict[date, List[CalendarItem]] = {}
+        today = date.today()
+
+        for day_key, items in self.items_by_day.items():
+            if not items:
+                continue
+            try:
+                day_value = date.fromisoformat(day_key)
+            except ValueError:
+                continue
+            if day_value < today:
+                continue
+            upcoming_by_day[day_value] = list(items)
+
+        if not upcoming_by_day:
+            return "No upcoming due dates from today onward.", None, 0
+
+        first_due_date = min(upcoming_by_day)
+        window_end = first_due_date + timedelta(days=3)
+        window_dates = sorted(day_value for day_value in upcoming_by_day if first_due_date <= day_value <= window_end)
+        window_item_count = sum(len(upcoming_by_day[day_value]) for day_value in window_dates)
+
+        lines = [
+            f"Next due date: {first_due_date.strftime('%A, %b %d, %Y')}",
+            f"Also showing all due dates through {window_end.strftime('%A, %b %d, %Y')}:",
+        ]
+        for day_value in window_dates:
+            day_items = sorted(
+                upcoming_by_day[day_value],
+                key=lambda item: (
+                    item.time_label.strip().lower(),
+                    item.title.strip().lower(),
+                ),
+            )
+            day_label = day_value.strftime("%a, %b %d")
+            lines.append(f"{day_label} ({len(day_items)} item{'s' if len(day_items) != 1 else ''})")
+            for item in day_items:
+                time_prefix = f"[{item.time_label}] " if item.time_label.strip() else ""
+                lines.append(f"- {time_prefix}{item.title}")
+
+        return "\n".join(lines), first_due_date, window_item_count
+
+    def _show_due_notice_popup(self, message: str) -> None:
+        """Shows a separate upcoming-due popup window and plays an auditory alert."""
+        if self._due_notice_window is None or not self._due_notice_window.winfo_exists():
+            self._due_notice_window = tk.Toplevel(self)
+            self._due_notice_window.title("Upcoming Due Dates")
+            self._due_notice_window.geometry("580x320")
+            self._due_notice_window.minsize(460, 220)
+            self._due_notice_window.resizable(True, True)
+            self._due_notice_window.transient(self)
+            self._due_notice_window.protocol("WM_DELETE_WINDOW", self._close_due_notice_window)
+            self._due_notice_window.columnconfigure(0, weight=1)
+            self._due_notice_window.rowconfigure(1, weight=1)
+
+            ttk.Label(
+                self._due_notice_window,
+                text="Upcoming due-date reminder",
+                style="Muted.TLabel",
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+
+            self._due_notice_text = tk.Text(self._due_notice_window, wrap="word")
+            self._due_notice_text.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+            self._due_notice_text.config(state="disabled")
+
+            button_row = ttk.Frame(self._due_notice_window)
+            button_row.grid(row=2, column=0, sticky="e", padx=12, pady=(4, 10))
+            ttk.Button(button_row, text="Close", command=self._close_due_notice_window).grid(row=0, column=0)
+        else:
+            self._due_notice_window.title("Upcoming Due Dates")
+
+        if self._due_notice_text is not None:
+            self._due_notice_text.config(state="normal")
+            self._due_notice_text.delete("1.0", tk.END)
+            self._due_notice_text.insert("1.0", message)
+            self._due_notice_text.config(state="disabled")
+
+        self._due_notice_window.deiconify()
+        self._due_notice_window.lift()
+        self._due_notice_window.focus_set()
+        self._play_due_notification_sound()
+
+    def _play_due_notification_sound(self) -> None:
+        """Plays a short built-in alert tone sequence for due-date notifications."""
+        for offset_ms in (0, 140):
+            self.after(offset_ms, self.bell)
+
+    def _close_due_notice_window(self) -> None:
+        """Closes the due-date notification popup."""
+        if self._due_notice_window is not None and self._due_notice_window.winfo_exists():
+            self._due_notice_window.destroy()
+        self._due_notice_window = None
+        self._due_notice_text = None
+
+    def _on_app_close(self) -> None:
+        """Cancels scheduled reminders and closes auxiliary windows before exiting."""
+        if self._due_reminder_after_id is not None:
+            try:
+                self.after_cancel(self._due_reminder_after_id)
+            except ValueError:
+                pass
+            self._due_reminder_after_id = None
+
+        self._close_due_notice_window()
+        self._close_error_window()
+        self.destroy()
 
     def _show_error(self, message: str, title: str = "Error") -> None:
         """Shows a non-modal, resizable error window that the user can close anytime."""

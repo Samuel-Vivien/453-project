@@ -9,6 +9,7 @@ Single-window desktop calendar built with Python + Tkinter.
 - Remove items inline in the same window
 - Stores data in `calendar_items.json` in the project directory
 - No popup dialogs required for item view/edit flows
+- While the app is open, shows a popup and plays a sound every other day leading up to the next due date
 
 ## Install (One Click)
 
