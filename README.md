@@ -59,7 +59,7 @@ python3 calendar_app.py
 - Use the right-side `View / Edit Item` section to add or update items.
 - Item count for each day is shown on the day button as `(count)`.
 - Use `Moodle Import` to crawl a Moodle URL and auto-import homework/assignment due dates.
-- Imported homework links prefer assignment submission pages.
+- Imported homework items are only added when a valid assignment submission page link is found.
 - Imported homework titles include course/class context (for example `[Course] Assignment ...`) to reduce ambiguity.
 - If the Moodle page requires authentication, enter username/password in the same panel and import again.
 - For external SSO (for example Microsoft login), install Selenium once (`py -3 -m pip install selenium`) so the app can automate sign-in and import dates.

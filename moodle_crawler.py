@@ -1165,14 +1165,13 @@ class MoodleCrawler:
                 class_label,
                 assignment_index,
             )
+            source_url = self._to_submission_page_url(source_url)
+            if not self._is_canonical_submission_page_url(source_url):
+                # Ignore rows that cannot be mapped to a concrete assignment submission page.
+                continue
 
             title = raw_title
             if category == "Homework":
-                low_confidence_title = self._is_low_confidence_homework_title(raw_title)
-                if low_confidence_title and source_url == page_url:
-                    # Skip generic homework rows unless they were confidently mapped to an assignment page.
-                    continue
-
                 resolved_class_label = class_label
                 info = assignment_index.get(self._canonical_url(self._to_submission_page_url(source_url)))
                 if info is not None and info.class_label:
@@ -1424,6 +1423,8 @@ class MoodleCrawler:
     ) -> Optional[MoodleEvent]:
         """Parses one assignment page into a single due-date homework event."""
         source_url = self._to_submission_page_url(page_url)
+        if not self._is_canonical_submission_page_url(source_url):
+            return None
         info = assignment_index.get(self._canonical_url(source_url))
 
         due_context, parsed_due = self._extract_due_context_from_lines(lines)
@@ -1662,6 +1663,17 @@ class MoodleCrawler:
                 parsed.fragment,
             )
         )
+
+    def _is_canonical_submission_page_url(self, url: str) -> bool:
+        """Checks whether a URL is a canonical Moodle assignment page with a numeric id."""
+        if not self._is_assignment_page_url(url):
+            return False
+        parsed = urlparse(url)
+        if parsed.path.lower() != "/mod/assign/view.php":
+            return False
+        query_map = {key.lower(): value for key, value in parse_qsl(parsed.query, keep_blank_values=True)}
+        assignment_id = (query_map.get("id") or query_map.get("cmid") or "").strip()
+        return bool(re.fullmatch(r"\d+", assignment_id))
 
     def _tokenize_title(self, value: str) -> Set[str]:
         """Normalizes a title into informative tokens for fuzzy matching."""
