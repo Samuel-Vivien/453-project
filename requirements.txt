@@ -1,1 +1,2 @@
+certifi>=2024.8.30
 selenium>=4.41.0

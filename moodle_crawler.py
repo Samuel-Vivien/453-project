@@ -10,11 +10,12 @@ from html.parser import HTMLParser
 import http.cookiejar
 import platform
 import re
+import ssl
 import time
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
-from urllib.request import HTTPCookieProcessor, Request, build_opener
+from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 
 
 @dataclass
@@ -325,7 +326,7 @@ class MoodleCrawler:
         try:
             first_html, first_final_url = self._fetch_html(opener, normalized_url)
         except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-            return [], False, f"Could not read Moodle page: {exc}"
+            return [], False, self._format_fetch_error(exc)
 
         if self._requires_login(first_html, first_final_url, normalized_url):
             if self._is_external_sso_url(first_final_url, normalized_url):
@@ -344,7 +345,7 @@ class MoodleCrawler:
             try:
                 first_html, first_final_url = self._fetch_html(opener, normalized_url)
             except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-                return [], True, f"Logged in, but could not re-open Moodle page: {exc}"
+                return [], True, self._format_fetch_error(exc, prefix="Logged in, but could not re-open Moodle page")
             if self._requires_login(first_html, first_final_url, normalized_url):
                 return [], True, "Login did not succeed. Verify credentials and Moodle URL."
 
@@ -741,7 +742,48 @@ class MoodleCrawler:
     def _build_opener(self):
         """Creates an opener with cookie persistence for session authentication."""
         cookie_jar = http.cookiejar.CookieJar()
-        return build_opener(HTTPCookieProcessor(cookie_jar))
+        ssl_context = self._build_ssl_context()
+        return build_opener(HTTPCookieProcessor(cookie_jar), HTTPSHandler(context=ssl_context))
+
+    def _build_ssl_context(self) -> ssl.SSLContext:
+        """Creates an HTTPS context using a bundled CA store when available."""
+        certifi_bundle = self._get_certifi_bundle_path()
+        if certifi_bundle:
+            return ssl.create_default_context(cafile=certifi_bundle)
+        return ssl.create_default_context()
+
+    def _get_certifi_bundle_path(self) -> str:
+        """Returns the installed certifi CA bundle path, if available."""
+        try:
+            import certifi  # type: ignore
+        except Exception:
+            return ""
+
+        try:
+            return str(certifi.where()).strip()
+        except Exception:
+            return ""
+
+    def _format_fetch_error(self, exc: Exception, prefix: str = "Could not read Moodle page") -> str:
+        """Converts low-level fetch failures into clearer user-facing messages."""
+        if self._is_ssl_certificate_error(exc):
+            return (
+                f"{prefix}: secure connection failed because this Python install could not verify the website "
+                "certificate. Re-run the installer to install the bundled CA certificates, then try again."
+            )
+        return f"{prefix}: {exc}"
+
+    def _is_ssl_certificate_error(self, exc: Exception) -> bool:
+        """Returns True when a fetch failure is caused by certificate verification."""
+        for candidate in (exc, getattr(exc, "reason", None), getattr(exc, "__cause__", None)):
+            if candidate is None:
+                continue
+            if isinstance(candidate, ssl.SSLCertVerificationError):
+                return True
+            lowered = str(candidate).lower()
+            if "certificate verify failed" in lowered or "unable to get local issuer certificate" in lowered:
+                return True
+        return False
 
     def _fetch_html(self, opener, url: str) -> Tuple[str, str]:
         """Fetches one HTML page and returns its body plus final resolved URL."""

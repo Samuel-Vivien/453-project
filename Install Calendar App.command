@@ -5,6 +5,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+echo "[0/4] Preparing macOS permissions..."
+chmod +x "$SCRIPT_DIR"/*.command 2>/dev/null || true
+if command -v xattr >/dev/null 2>&1; then
+    xattr -dr com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null || true
+fi
+
 echo "[1/4] Locating Python 3..."
 PY_CMD=""
 if command -v python3 >/dev/null 2>&1; then
@@ -50,4 +56,5 @@ echo "[3/4] Installing dependencies..."
 
 echo "[4/4] Installation complete."
 echo "You can now start the app by double-clicking \"Run Calendar App.command\"."
+echo "This installer also removed macOS quarantine from the project when possible."
 read -r -p "Press Enter to close..."

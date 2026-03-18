@@ -5,6 +5,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+chmod +x "$SCRIPT_DIR"/*.command 2>/dev/null || true
+if command -v xattr >/dev/null 2>&1; then
+    xattr -dr com.apple.quarantine "$SCRIPT_DIR" 2>/dev/null || true
+fi
+
 VENV_ACTIVATE=".venv/bin/activate"
 if [[ ! -f "$VENV_ACTIVATE" ]]; then
     echo "App dependencies are not installed yet."
