@@ -8,7 +8,9 @@ from datetime import date, timedelta
 from html import unescape
 from html.parser import HTMLParser
 import http.cookiejar
+from pathlib import Path
 import platform
+import plistlib
 import re
 import ssl
 import time
@@ -408,6 +410,7 @@ class MoodleCrawler:
             from selenium import webdriver  # type: ignore
             from selenium.common.exceptions import TimeoutException, WebDriverException  # type: ignore
             from selenium.webdriver.chrome.options import Options as ChromeOptions  # type: ignore
+            from selenium.webdriver.firefox.options import Options as FirefoxOptions  # type: ignore
             from selenium.webdriver.common.by import By  # type: ignore
             from selenium.webdriver.edge.options import Options as EdgeOptions  # type: ignore
             from selenium.webdriver.support import expected_conditions as EC  # type: ignore
@@ -420,6 +423,7 @@ class MoodleCrawler:
             "TimeoutException": TimeoutException,
             "WebDriverException": WebDriverException,
             "ChromeOptions": ChromeOptions,
+            "FirefoxOptions": FirefoxOptions,
             "EdgeOptions": EdgeOptions,
             "By": By,
             "EC": EC,
@@ -432,37 +436,131 @@ class MoodleCrawler:
         WebDriverException = selenium_bundle["WebDriverException"]
         EdgeOptions = selenium_bundle["EdgeOptions"]
         ChromeOptions = selenium_bundle["ChromeOptions"]
+        FirefoxOptions = selenium_bundle["FirefoxOptions"]
 
         errors: List[str] = []
+        for browser_name in self._preferred_webdriver_order():
+            try:
+                driver = self._start_named_webdriver(
+                    browser_name=browser_name,
+                    webdriver=webdriver,
+                    EdgeOptions=EdgeOptions,
+                    ChromeOptions=ChromeOptions,
+                    FirefoxOptions=FirefoxOptions,
+                )
+                return driver, browser_name, ""
+            except WebDriverException as exc:
+                errors.append(f"{browser_name}: {exc}")
+
+        return None, "", "; ".join(errors) if errors else "No supported browser found."
+
+    def _preferred_webdriver_order(self) -> List[str]:
+        """Returns webdriver startup order using the user's default browser first."""
         is_macos = platform.system().lower() == "darwin"
+        fallbacks = ["Safari", "Chrome", "Firefox", "Edge"] if is_macos else ["Edge", "Chrome", "Firefox", "Safari"]
+        detected_default = self._detect_system_default_browser()
+        ordered = [detected_default] if detected_default else []
+        for browser_name in fallbacks:
+            if browser_name not in ordered:
+                ordered.append(browser_name)
+        return ordered
 
-        if is_macos:
-            try:
-                safari_driver = webdriver.Safari()
-                return safari_driver, "Safari", ""
-            except WebDriverException as exc:
-                errors.append(f"Safari: {exc}")
+    def _detect_system_default_browser(self) -> str:
+        """Detects the user's default browser when it maps to a supported webdriver."""
+        system_name = platform.system().lower()
+        if system_name == "windows":
+            return self._detect_windows_default_browser()
+        if system_name == "darwin":
+            return self._detect_macos_default_browser()
+        return ""
 
-        if not is_macos:
-            try:
-                edge_options = EdgeOptions()
-                edge_options.add_argument("--disable-gpu")
-                edge_options.add_argument("--window-size=1380,980")
-                edge_driver = webdriver.Edge(options=edge_options)
-                return edge_driver, "Edge", ""
-            except WebDriverException as exc:
-                errors.append(f"Edge: {exc}")
-
+    def _detect_windows_default_browser(self) -> str:
+        """Reads the Windows default HTTPS handler from the current user's registry."""
         try:
+            import winreg  # type: ignore
+        except Exception:
+            return ""
+
+        key_path = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                prog_id = str(winreg.QueryValueEx(key, "ProgId")[0]).strip()
+        except OSError:
+            return ""
+        return self._browser_name_from_handler(prog_id)
+
+    def _detect_macos_default_browser(self) -> str:
+        """Reads the macOS LaunchServices HTTPS handler from user preferences."""
+        candidate_paths = (
+            Path.home() / "Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist",
+            Path.home() / "Library/Preferences/com.apple.LaunchServices.plist",
+        )
+        for candidate_path in candidate_paths:
+            try:
+                with candidate_path.open("rb") as handle:
+                    payload = plistlib.load(handle)
+            except Exception:
+                continue
+
+            handlers = payload.get("LSHandlers", [])
+            if not isinstance(handlers, list):
+                continue
+            for entry in handlers:
+                if not isinstance(entry, dict):
+                    continue
+                if str(entry.get("LSHandlerURLScheme", "")).lower() != "https":
+                    continue
+                handler_name = (
+                    str(entry.get("LSHandlerRoleAll") or "").strip()
+                    or str(entry.get("LSHandlerRoleViewer") or "").strip()
+                )
+                browser_name = self._browser_name_from_handler(handler_name)
+                if browser_name:
+                    return browser_name
+        return ""
+
+    def _browser_name_from_handler(self, handler_name: str) -> str:
+        """Maps OS browser handler identifiers to supported webdriver browser names."""
+        lowered = handler_name.strip().lower()
+        if not lowered:
+            return ""
+        if "firefox" in lowered:
+            return "Firefox"
+        if "chrome" in lowered:
+            return "Chrome"
+        if "edge" in lowered:
+            return "Edge"
+        if "safari" in lowered:
+            return "Safari"
+        return ""
+
+    def _start_named_webdriver(
+        self,
+        browser_name: str,
+        webdriver,
+        EdgeOptions,
+        ChromeOptions,
+        FirefoxOptions,
+    ):
+        """Starts one named webdriver instance with shared window defaults."""
+        if browser_name == "Safari":
+            return webdriver.Safari()
+        if browser_name == "Edge":
+            edge_options = EdgeOptions()
+            edge_options.add_argument("--disable-gpu")
+            edge_options.add_argument("--window-size=1380,980")
+            return webdriver.Edge(options=edge_options)
+        if browser_name == "Chrome":
             chrome_options = ChromeOptions()
             chrome_options.add_argument("--disable-gpu")
             chrome_options.add_argument("--window-size=1380,980")
-            chrome_driver = webdriver.Chrome(options=chrome_options)
-            return chrome_driver, "Chrome", ""
-        except WebDriverException as exc:
-            errors.append(f"Chrome: {exc}")
-
-        return None, "", "; ".join(errors) if errors else "No supported browser found."
+            return webdriver.Chrome(options=chrome_options)
+        if browser_name == "Firefox":
+            firefox_options = FirefoxOptions()
+            firefox_options.add_argument("--width=1380")
+            firefox_options.add_argument("--height=980")
+            return webdriver.Firefox(options=firefox_options)
+        raise ValueError(f"Unsupported browser requested: {browser_name}")
 
     def _perform_sso_login(
         self,
