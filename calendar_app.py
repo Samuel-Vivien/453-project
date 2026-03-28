@@ -196,11 +196,11 @@ class CalendarApp(tk.Tk):
         moodle_frame.grid(row=3, column=0, sticky="ew")
         moodle_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(moodle_frame, text="Site URL").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(moodle_frame, text="Moodle Dashboard Url").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.moodle_url_var = tk.StringVar()
         ttk.Entry(moodle_frame, textvariable=self.moodle_url_var).grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Label(moodle_frame, text="Username").grid(row=1, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(moodle_frame, text="School Email").grid(row=1, column=0, sticky="w", pady=(0, 4))
         self.moodle_username_var = tk.StringVar()
         self.moodle_username_entry = ttk.Entry(moodle_frame, textvariable=self.moodle_username_var)
         self.moodle_username_entry.grid(row=1, column=1, sticky="ew", pady=(0, 4))
