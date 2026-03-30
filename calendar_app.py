@@ -78,6 +78,7 @@ class CalendarApp(tk.Tk):
         self.style = ttk.Style(self)
         self.style.configure("SelectedDay.TButton", foreground="#0a4f9c")
         self.style.configure("NormalDay.TButton", foreground="#1f1f1f")
+        self.style.configure("OverflowDay.TButton", foreground="#888888")
         self.style.configure("Muted.TLabel", foreground="#4a4a4a")
 
         self._build_layout()
@@ -258,7 +259,7 @@ class CalendarApp(tk.Tk):
         self._refresh_calendar()
 
     def _refresh_calendar(self) -> None:
-        """Renders the monthly grid using only real dates for the active month view."""
+        """Renders the monthly grid showing current month dates with overflow from previous/next months."""
         self.month_label.config(text=f"{calendar.month_name[self.current_month]} {self.current_year}")
         if self.selected_date.month != self.current_month or self.selected_date.year != self.current_year:
             # Keep selection valid when navigating months by snapping to the first day.
@@ -280,18 +281,17 @@ class CalendarApp(tk.Tk):
 
             btn.grid()
             day = flat_days[idx]
-            self._button_dates[idx] = day if day.month == self.current_month else None
+            is_current_month = day.month == self.current_month
+            self._button_dates[idx] = day if is_current_month else None
 
-            if day.month != self.current_month:
-                btn.config(text="", state="disabled", style="NormalDay.TButton")
-                continue
-
-            count = len(self.items_by_day.get(self._date_key(day), []))
-            suffix = f"\n({count})" if count else ""
-            btn.config(text=f"{day.day}{suffix}", state="normal")
-
-            style_name = "SelectedDay.TButton" if day == self.selected_date else "NormalDay.TButton"
-            btn.config(style=style_name)
+            if is_current_month:
+                count = len(self.items_by_day.get(self._date_key(day), []))
+                suffix = f"\n({count})" if count else ""
+                btn.config(text=f"{day.day}{suffix}", state="normal")
+                style_name = "SelectedDay.TButton" if day == self.selected_date else "NormalDay.TButton"
+                btn.config(style=style_name)
+            else:
+                btn.config(text=f"{day.day}", state="disabled", style="OverflowDay.TButton")
 
         self._refresh_selected_day_label()
         self._refresh_item_list()
