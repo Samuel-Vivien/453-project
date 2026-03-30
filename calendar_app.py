@@ -24,6 +24,40 @@ from moodle_crawler import MoodleCrawler, MoodleEvent
 DATA_FILE = Path(__file__).with_name("calendar_items.json")
 URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>\"']+)")
 
+LIGHT_THEME = {
+    "bg": "#f4f6fb",
+    "panel": "#ffffff",
+    "panel_alt": "#eef2f7",
+    "text": "#1f1f1f",
+    "muted": "#5f6b7a",
+    "accent": "#2563eb",
+    "accent_text": "#ffffff",
+    "border": "#cbd5e1",
+    "input_bg": "#ffffff",
+    "input_fg": "#1f1f1f",
+    "list_select_bg": "#2563eb",
+    "list_select_fg": "#ffffff",
+    "overflow": "#8a8f98",
+    "status_bg": "#e5e7eb",
+}
+
+DARK_THEME = {
+    "bg": "#000000",       
+    "panel": "#0d0d0d",       
+    "panel_alt": "#1a1a1a",   
+    "text": "#ffffff",      
+    "muted": "#aaaaaa",      
+    "accent": "#0a84ff",      
+    "accent_text": "#ffffff",
+    "border": "#333333",
+    "input_bg": "#0a0a0a",
+    "input_fg": "#ffffff",
+    "list_select_bg": "#2563eb",
+    "list_select_fg": "#ffffff",
+    "overflow": "#777777",
+    "status_bg": "#0d0d0d",
+}
+
 
 @dataclass
 class CalendarItem:
@@ -51,6 +85,8 @@ class CalendarApp(tk.Tk):
     def __init__(self) -> None:
         """Initializes UI state, loads persisted data, and renders first view."""
         super().__init__()
+        self.theme_name = "dark"
+        self.theme = DARK_THEME
         self.title("Desktop Calendar")
         self.geometry("1120x700")
         self.minsize(960, 620)
@@ -76,12 +112,10 @@ class CalendarApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
         self.style = ttk.Style(self)
-        self.style.configure("SelectedDay.TButton", foreground="#0a4f9c")
-        self.style.configure("NormalDay.TButton", foreground="#1f1f1f")
-        self.style.configure("OverflowDay.TButton", foreground="#888888")
-        self.style.configure("Muted.TLabel", foreground="#4a4a4a")
+        self.style.theme_use("clam")
 
         self._build_layout()
+        self._apply_theme()
         self._load_items()
         removed_count = self._dedupe_existing_import_items()
         if removed_count:
@@ -96,25 +130,28 @@ class CalendarApp(tk.Tk):
         self.columnconfigure(1, weight=2)
         self.rowconfigure(0, weight=1)
 
-        calendar_panel = ttk.Frame(self, padding=14)
+        calendar_panel = ttk.Frame(self, padding=14, style="Panel.TFrame")
         calendar_panel.grid(row=0, column=0, sticky="nsew")
         calendar_panel.columnconfigure(0, weight=1)
         calendar_panel.rowconfigure(2, weight=1)
 
-        nav_frame = ttk.Frame(calendar_panel)
+        nav_frame = ttk.Frame(calendar_panel, style="Panel.TFrame")
         nav_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         nav_frame.columnconfigure(1, weight=1)
 
         self.prev_btn = ttk.Button(nav_frame, text="<", width=4, command=self._go_previous_month)
         self.prev_btn.grid(row=0, column=0, sticky="w")
 
-        self.month_label = ttk.Label(nav_frame, text="", font=("Segoe UI", 15, "bold"))
+        self.month_label = ttk.Label(nav_frame, text="", font=("Segoe UI", 15, "bold"), style="Panel.TLabel")
         self.month_label.grid(row=0, column=1)
 
         self.next_btn = ttk.Button(nav_frame, text=">", width=4, command=self._go_next_month)
         self.next_btn.grid(row=0, column=2, sticky="e")
 
-        weekdays = ttk.Frame(calendar_panel)
+        self.theme_button = ttk.Button(nav_frame, text="Light Mode", command=self._toggle_theme)
+        self.theme_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+        weekdays = ttk.Frame(calendar_panel, style="Panel.TFrame")
         weekdays.grid(row=1, column=0, sticky="ew")
         weekdays.columnconfigure(tuple(range(7)), weight=1)
         for idx, weekday in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
@@ -122,7 +159,7 @@ class CalendarApp(tk.Tk):
                 row=0, column=idx, sticky="ew", padx=2, pady=(0, 4)
             )
 
-        self.calendar_grid = ttk.Frame(calendar_panel)
+        self.calendar_grid = ttk.Frame(calendar_panel, style="Panel.TFrame")
         self.calendar_grid.grid(row=2, column=0, sticky="nsew")
         for row in range(6):
             self.calendar_grid.rowconfigure(row, weight=1)
@@ -141,15 +178,16 @@ class CalendarApp(tk.Tk):
             btn.grid(row=row, column=col, sticky="nsew", padx=2, pady=2, ipadx=2, ipady=10)
             self.day_buttons.append(btn)
 
-        side_panel = ttk.Frame(self, padding=14)
+        side_panel = ttk.Frame(self, padding=14, style="Panel.TFrame")
         side_panel.grid(row=0, column=1, sticky="nsew")
         side_panel.columnconfigure(0, weight=1)
         side_panel.rowconfigure(1, weight=1)
 
-        self.selected_day_label = ttk.Label(side_panel, text="", font=("Segoe UI", 13, "bold"))
+        self.selected_day_label = ttk.Label(side_panel, text="", font=("Segoe UI", 13, "bold"), style="Panel.TLabel")
         self.selected_day_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        items_frame = ttk.LabelFrame(side_panel, text="Items", padding=8)
+        items_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
+        ttk.Label(items_frame, text="Items", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         items_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
         items_frame.columnconfigure(0, weight=1)
         items_frame.rowconfigure(0, weight=1)
@@ -162,17 +200,20 @@ class CalendarApp(tk.Tk):
         list_scroll.grid(row=0, column=1, sticky="ns")
         self.item_list.config(yscrollcommand=list_scroll.set)
 
-        editor_frame = ttk.LabelFrame(side_panel, text="View / Edit Item", padding=8)
+        editor_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
+        ttk.Label(editor_frame, text="View / Edit Item", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
         editor_frame.grid(row=2, column=0, sticky="nsew")
         editor_frame.columnconfigure(1, weight=1)
 
         ttk.Label(editor_frame, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.title_var = tk.StringVar()
-        ttk.Entry(editor_frame, textvariable=self.title_var).grid(row=0, column=1, sticky="ew", pady=(0, 4))
+        self.title_entry = ttk.Entry(editor_frame, textvariable=self.title_var)
+        self.title_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
         ttk.Label(editor_frame, text="Time").grid(row=1, column=0, sticky="w", pady=(0, 4))
         self.time_var = tk.StringVar()
-        ttk.Entry(editor_frame, textvariable=self.time_var).grid(row=1, column=1, sticky="ew", pady=(0, 4))
+        self.time_entry = ttk.Entry(editor_frame, textvariable=self.time_var)
+        self.time_entry.grid(row=1, column=1, sticky="ew", pady=(0, 4))
 
         ttk.Label(editor_frame, text="Details").grid(row=2, column=0, sticky="nw", pady=(0, 4))
         self.details_text = tk.Text(editor_frame, height=6, wrap="word")
@@ -180,7 +221,7 @@ class CalendarApp(tk.Tk):
         self.details_text.bind("<KeyRelease>", self._on_details_changed)
         editor_frame.rowconfigure(2, weight=1)
 
-        action_frame = ttk.Frame(editor_frame)
+        action_frame = ttk.Frame(editor_frame, style="Panel.TFrame")
         action_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         action_frame.columnconfigure(tuple(range(4)), weight=1)
 
@@ -193,13 +234,15 @@ class CalendarApp(tk.Tk):
         self.clear_button = ttk.Button(action_frame, text="Clear", command=self._clear_editor)
         self.clear_button.grid(row=0, column=3, sticky="ew", padx=(3, 0))
 
-        moodle_frame = ttk.LabelFrame(side_panel, text="Moodle Import", padding=8)
+        moodle_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
+        ttk.Label(moodle_frame, text="Moodle Import", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
         moodle_frame.grid(row=3, column=0, sticky="ew")
         moodle_frame.columnconfigure(1, weight=1)
 
         ttk.Label(moodle_frame, text="Moodle Dashboard Url").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.moodle_url_var = tk.StringVar()
-        ttk.Entry(moodle_frame, textvariable=self.moodle_url_var).grid(row=0, column=1, sticky="ew", pady=(0, 4))
+        self.moodle_url_entry = ttk.Entry(moodle_frame, textvariable=self.moodle_url_var)
+        self.moodle_url_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
         ttk.Label(moodle_frame, text="School Email").grid(row=1, column=0, sticky="w", pady=(0, 4))
         self.moodle_username_var = tk.StringVar()
@@ -208,9 +251,8 @@ class CalendarApp(tk.Tk):
 
         ttk.Label(moodle_frame, text="Password").grid(row=2, column=0, sticky="w", pady=(0, 4))
         self.moodle_password_var = tk.StringVar()
-        ttk.Entry(moodle_frame, textvariable=self.moodle_password_var, show="*").grid(
-            row=2, column=1, sticky="ew", pady=(0, 4)
-        )
+        self.moodle_password_entry = ttk.Entry(moodle_frame, textvariable=self.moodle_password_var, show="*")
+        self.moodle_password_entry.grid(row=2, column=1, sticky="ew", pady=(0, 4))
 
         ttk.Button(moodle_frame, text="Import Moodle Dates", command=self._import_moodle_dates).grid(
             row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
@@ -234,9 +276,8 @@ class CalendarApp(tk.Tk):
         self.clear_all_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(self, textvariable=self.status_var, relief="groove", anchor="w", padding=6).grid(
-            row=1, column=0, columnspan=2, sticky="ew"
-        )
+        self.status_label = tk.Label(self, textvariable=self.status_var, anchor="w", padx=8, pady=6)
+        self.status_label.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         self._button_dates: Dict[int, Optional[date]] = {idx: None for idx in range(42)}
 
@@ -257,6 +298,150 @@ class CalendarApp(tk.Tk):
         else:
             self.current_month += 1
         self._refresh_calendar()
+
+    def _toggle_theme(self) -> None:
+        """Switches between light mode and dark mode."""
+        if self.theme_name == "dark":
+            self.theme_name = "light"
+            self.theme = LIGHT_THEME
+        else:
+            self.theme_name = "dark"
+            self.theme = DARK_THEME
+
+        self._apply_theme()
+        self._refresh_details_links()
+
+    def _apply_theme(self) -> None:
+        """Applies the current theme colors to the app and popup windows."""
+        t = self.theme
+
+        self.configure(bg=t["bg"])
+
+        self.style.configure("TFrame", background=t["bg"])
+        self.style.configure("TLabel", background=t["bg"], foreground=t["text"])
+        self.style.configure("Panel.TFrame", background=t["panel"])
+        self.style.configure("Panel.TLabel", background=t["panel"], foreground=t["text"])
+        self.style.configure("Muted.TLabel", background=t["bg"], foreground=t["muted"])
+
+        self.style.configure(
+            "TLabelFrame",
+            background=t["panel"],
+            foreground=t["text"],
+            bordercolor=t["border"],
+            relief="solid",
+        )
+        self.style.configure(
+            "TLabelFrame.Label",
+            background=t["panel"],
+            foreground=t["text"],
+        )
+
+        self.style.configure(
+            "TButton",
+            background=t["panel_alt"],
+            foreground=t["text"],
+            bordercolor=t["border"],
+            focuscolor=t["accent"],
+            padding=6,
+        )
+        self.style.map(
+            "TButton",
+            background=[("active", t["accent"]), ("pressed", t["accent"])],
+            foreground=[("active", t["accent_text"]), ("pressed", t["accent_text"])],
+        )
+
+        self.style.configure(
+            "NormalDay.TButton",
+            background=t["panel"],
+            foreground=t["text"],
+            bordercolor=t["border"],
+            padding=10,
+        )
+        self.style.map(
+            "NormalDay.TButton",
+            background=[("active", t["panel_alt"])],
+            foreground=[("active", t["text"])],
+        )
+
+        self.style.configure(
+            "SelectedDay.TButton",
+            background=t["accent"],
+            foreground=t["accent_text"],
+            bordercolor=t["accent"],
+            padding=10,
+        )
+        self.style.map(
+            "SelectedDay.TButton",
+            background=[("active", t["accent"])],
+            foreground=[("active", t["accent_text"])],
+        )
+
+        self.style.configure(
+            "OverflowDay.TButton",
+            background=t["panel_alt"],
+            foreground=t["overflow"],
+            bordercolor=t["border"],
+            padding=10,
+        )
+
+        self.style.configure(
+            "TEntry",
+            fieldbackground=t["input_bg"],
+            foreground=t["input_fg"],
+            bordercolor=t["border"],
+            insertcolor=t["input_fg"],
+        )
+
+        self.style.configure(
+            "Vertical.TScrollbar",
+            background=t["panel_alt"],
+            troughcolor=t["bg"],
+            bordercolor=t["border"],
+            arrowcolor=t["text"],
+        )
+
+        self.item_list.configure(
+            bg=t["input_bg"],
+            fg=t["input_fg"],
+            selectbackground=t["list_select_bg"],
+            selectforeground=t["list_select_fg"],
+            highlightbackground=t["border"],
+            highlightcolor=t["accent"],
+            relief="flat",
+        )
+
+        self.details_text.configure(
+            bg=t["input_bg"],
+            fg=t["input_fg"],
+            insertbackground=t["input_fg"],
+            highlightbackground=t["border"],
+            highlightcolor=t["accent"],
+            relief="flat",
+        )
+
+        if hasattr(self, "status_label"):
+            self.status_label.configure(bg=t["status_bg"], fg=t["text"])
+
+        if hasattr(self, "theme_button"):
+            self.theme_button.config(text="Light Mode" if self.theme_name == "dark" else "Dark Mode")
+
+        if self._due_notice_window is not None and self._due_notice_window.winfo_exists():
+            self._due_notice_window.configure(bg=t["bg"])
+        if self._due_notice_text is not None and self._due_notice_text.winfo_exists():
+            self._due_notice_text.configure(
+                bg=t["input_bg"],
+                fg=t["input_fg"],
+                insertbackground=t["input_fg"],
+            )
+
+        if self._error_window is not None and self._error_window.winfo_exists():
+            self._error_window.configure(bg=t["bg"])
+        if self._error_text is not None and self._error_text.winfo_exists():
+            self._error_text.configure(
+                bg=t["input_bg"],
+                fg=t["input_fg"],
+                insertbackground=t["input_fg"],
+            )
 
     def _refresh_calendar(self) -> None:
         """Renders the monthly grid showing current month dates with overflow from previous/next months."""
@@ -477,7 +662,7 @@ class CalendarApp(tk.Tk):
 
             self._url_tag_to_link[tag_name] = clean_link
             self.details_text.tag_add(tag_name, start_index, end_index)
-            self.details_text.tag_configure(tag_name, foreground="#0a4f9c", underline=True)
+            self.details_text.tag_configure(tag_name, foreground=self.theme["accent"], underline=True)
             self.details_text.tag_bind(
                 tag_name,
                 "<Button-1>",
@@ -1073,6 +1258,7 @@ class CalendarApp(tk.Tk):
             self._due_notice_window.resizable(True, True)
             self._due_notice_window.transient(self)
             self._due_notice_window.protocol("WM_DELETE_WINDOW", self._close_due_notice_window)
+            self._due_notice_window.configure(bg=self.theme["bg"])
             self._due_notice_window.columnconfigure(0, weight=1)
             self._due_notice_window.rowconfigure(1, weight=1)
 
@@ -1082,7 +1268,13 @@ class CalendarApp(tk.Tk):
                 style="Muted.TLabel",
             ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
 
-            self._due_notice_text = tk.Text(self._due_notice_window, wrap="word")
+            self._due_notice_text = tk.Text(
+                self._due_notice_window,
+                wrap="word",
+                bg=self.theme["input_bg"],
+                fg=self.theme["input_fg"],
+                insertbackground=self.theme["input_fg"],
+            )
             self._due_notice_text.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
             self._due_notice_text.config(state="disabled")
 
@@ -1138,6 +1330,7 @@ class CalendarApp(tk.Tk):
             self._error_window.resizable(True, True)
             self._error_window.transient(self)
             self._error_window.protocol("WM_DELETE_WINDOW", self._close_error_window)
+            self._error_window.configure(bg=self.theme["bg"])
             self._error_window.columnconfigure(0, weight=1)
             self._error_window.rowconfigure(1, weight=1)
 
@@ -1147,7 +1340,13 @@ class CalendarApp(tk.Tk):
                 style="Muted.TLabel",
             ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
 
-            self._error_text = tk.Text(self._error_window, wrap="word")
+            self._error_text = tk.Text(
+                self._error_window,
+                wrap="word",
+                bg=self.theme["input_bg"],
+                fg=self.theme["input_fg"],
+                insertbackground=self.theme["input_fg"],
+            )
             self._error_text.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
             self._error_text.config(state="disabled")
 
