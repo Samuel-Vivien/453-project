@@ -387,6 +387,13 @@ class MoodleCrawler:
             if not logged_in:
                 return [], True, message
 
+            try:
+                driver.get(start_url)
+                self._wait_for_document_ready(driver)
+            except Exception:
+                # If the post-login refresh fails, still attempt to crawl from the current authenticated page.
+                pass
+
             pages = self._collect_pages_with_driver(driver, start_url)
         finally:
             try:
@@ -572,11 +579,9 @@ class MoodleCrawler:
     ) -> Tuple[bool, str]:
         """Performs Microsoft-style SSO using username/password and waits for Moodle redirect."""
         By = selenium_bundle["By"]
-        WebDriverWait = selenium_bundle["WebDriverWait"]
         TimeoutException = selenium_bundle["TimeoutException"]
 
         moodle_host = urlparse(start_url).netloc.lower()
-        wait = WebDriverWait(driver, self._SELENIUM_WAIT_SECONDS)
 
         try:
             driver.get(start_url)
@@ -588,43 +593,63 @@ class MoodleCrawler:
             return True, "Already authenticated."
 
         try:
-            username_input = self._wait_for_editable_input(
+            sso_state, sso_input = self._wait_for_sso_input_or_redirect(
                 driver,
-                wait,
-                ((By.ID, "i0116"), (By.NAME, "loginfmt")),
+                moodle_host,
+                (
+                    ("username", ((By.ID, "i0116"), (By.NAME, "loginfmt"))),
+                    ("password", ((By.ID, "i0118"), (By.NAME, "passwd"))),
+                ),
+                self._SELENIUM_WAIT_SECONDS,
             )
-            if username_input is None or not self._enter_text_into_input(driver, username_input, username):
-                return False, "SSO login failed: could not enter username in the Microsoft login form."
-            self._click_first_if_present(driver, By, ("idSIButton9",))
+            if sso_state == "redirected":
+                self._wait_for_document_ready(driver)
+                return True, "SSO login successful after manual Microsoft sign-in."
 
-            password_input = self._wait_for_editable_input(
-                driver,
-                wait,
-                ((By.ID, "i0118"), (By.NAME, "passwd")),
-            )
+            password_input = None
+            if sso_state == "username":
+                if sso_input is None or not self._enter_text_into_input(driver, sso_input, username):
+                    manual_ok, manual_message = self._wait_for_manual_moodle_redirect(driver, moodle_host)
+                    if manual_ok:
+                        return True, manual_message
+                    return False, "SSO login failed: could not enter username in the Microsoft login form."
+                self._click_first_if_present(driver, By, ("idSIButton9",))
+
+                password_state, password_candidate = self._wait_for_sso_input_or_redirect(
+                    driver,
+                    moodle_host,
+                    (("password", ((By.ID, "i0118"), (By.NAME, "passwd"))),),
+                    self._SELENIUM_WAIT_SECONDS,
+                )
+                if password_state == "redirected":
+                    self._wait_for_document_ready(driver)
+                    return True, "SSO login successful after manual Microsoft sign-in."
+                if password_state == "password":
+                    password_input = password_candidate
+            elif sso_state == "password":
+                password_input = sso_input
+            else:
+                manual_ok, manual_message = self._wait_for_manual_moodle_redirect(driver, moodle_host)
+                if manual_ok:
+                    return True, manual_message
+                return (
+                    False,
+                    "SSO login failed: Microsoft did not expose an editable username field before timing out.",
+                )
+
             if password_input is None or not self._enter_text_into_input(driver, password_input, password):
+                manual_ok, manual_message = self._wait_for_manual_moodle_redirect(driver, moodle_host)
+                if manual_ok:
+                    return True, manual_message
                 return False, "SSO login failed: could not enter password in the Microsoft login form."
             self._click_first_if_present(driver, By, ("idSIButton9",))
 
             # Decline "Stay signed in?" to avoid changing account persistence.
             self._click_first_if_present(driver, By, ("idBtn_Back",))
             self._click_first_if_present(driver, By, ("idSIButton9",))
-            self._wait_for_document_ready(driver)
-
-            if self._wait_for_redirect_to_host(driver, moodle_host, self._SELENIUM_WAIT_SECONDS):
-                return True, "SSO login successful."
-
-            # Always leave the browser open for credential correction after automated submit.
-            if self._wait_for_redirect_to_host(driver, moodle_host, self._MANUAL_CREDENTIAL_WAIT_SECONDS):
-                return True, "SSO login successful after manual credential correction."
-
-            # Also leave a separate window for manual password correction.
-            if self._wait_for_redirect_to_host(driver, moodle_host, self._MANUAL_PASSWORD_WAIT_SECONDS):
-                return True, "SSO login successful after manual password correction."
-
-            # Then leave the browser open for phone-based MFA approval.
-            if self._wait_for_redirect_to_host(driver, moodle_host, self._MFA_WAIT_SECONDS):
-                return True, "SSO login successful after manual phone verification."
+            manual_ok, manual_message = self._wait_for_manual_moodle_redirect(driver, moodle_host)
+            if manual_ok:
+                return True, manual_message
         except TimeoutException:
             return (
                 False,
@@ -642,35 +667,79 @@ class MoodleCrawler:
             return False, "SSO login timed out waiting for Microsoft phone verification."
         return False, "SSO login timed out before returning to Moodle."
 
-    def _wait_for_editable_input(self, driver, wait, locators: Sequence[Tuple[object, str]]):
-        """Returns the first visible editable input among candidate locators."""
-        def _find_input(d):
-            """Returns the first interactable text-like input from candidate locators."""
-            for by, selector in locators:
+    def _wait_for_sso_input_or_redirect(
+        self,
+        driver,
+        expected_host: str,
+        locator_groups: Sequence[Tuple[str, Sequence[Tuple[object, str]]]],
+        timeout_seconds: int,
+    ) -> Tuple[str, Optional[object]]:
+        """Waits for either a Microsoft credential input to appear or a redirect back to Moodle."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            current_host = urlparse(str(getattr(driver, "current_url", ""))).netloc.lower()
+            if current_host == expected_host:
+                return "redirected", None
+            for state_name, locators in locator_groups:
+                candidate = self._find_first_editable_input(driver, locators)
+                if candidate is not None:
+                    return state_name, candidate
+            time.sleep(0.3)
+
+        current_host = urlparse(str(getattr(driver, "current_url", ""))).netloc.lower()
+        if current_host == expected_host:
+            return "redirected", None
+        for state_name, locators in locator_groups:
+            candidate = self._find_first_editable_input(driver, locators)
+            if candidate is not None:
+                return state_name, candidate
+        return "timeout", None
+
+    def _wait_for_manual_moodle_redirect(self, driver, moodle_host: str) -> Tuple[bool, str]:
+        """Allows manual SSO/account-picker/MFA completion and returns success once Moodle loads."""
+        if self._wait_for_redirect_to_host(driver, moodle_host, self._SELENIUM_WAIT_SECONDS):
+            self._wait_for_document_ready(driver)
+            return True, "SSO login successful."
+
+        # Leave the browser open for manual account selection or username correction.
+        if self._wait_for_redirect_to_host(driver, moodle_host, self._MANUAL_CREDENTIAL_WAIT_SECONDS):
+            self._wait_for_document_ready(driver)
+            return True, "SSO login successful after manual account selection or credential correction."
+
+        # Also leave a separate window for manual password correction.
+        if self._wait_for_redirect_to_host(driver, moodle_host, self._MANUAL_PASSWORD_WAIT_SECONDS):
+            self._wait_for_document_ready(driver)
+            return True, "SSO login successful after manual password correction."
+
+        # Then leave the browser open for phone-based MFA approval.
+        if self._wait_for_redirect_to_host(driver, moodle_host, self._MFA_WAIT_SECONDS):
+            self._wait_for_document_ready(driver)
+            return True, "SSO login successful after manual phone verification."
+
+        return False, ""
+
+    def _find_first_editable_input(self, driver, locators: Sequence[Tuple[object, str]]):
+        """Returns the first visible editable input from the provided locator list."""
+        for by, selector in locators:
+            try:
+                candidates = driver.find_elements(by, selector)
+            except Exception:
+                continue
+            for candidate in candidates:
                 try:
-                    candidates = d.find_elements(by, selector)
+                    if not candidate.is_displayed() or not candidate.is_enabled():
+                        continue
+                    input_type = (candidate.get_attribute("type") or "").strip().lower()
+                    readonly = (candidate.get_attribute("readonly") or "").strip().lower()
+                    disabled = (candidate.get_attribute("disabled") or "").strip().lower()
+                    if input_type in {"hidden", "button", "submit"}:
+                        continue
+                    if readonly in {"readonly", "true"} or disabled in {"disabled", "true"}:
+                        continue
+                    return candidate
                 except Exception:
                     continue
-                for candidate in candidates:
-                    try:
-                        if not candidate.is_displayed() or not candidate.is_enabled():
-                            continue
-                        input_type = (candidate.get_attribute("type") or "").strip().lower()
-                        readonly = (candidate.get_attribute("readonly") or "").strip().lower()
-                        disabled = (candidate.get_attribute("disabled") or "").strip().lower()
-                        if input_type in {"hidden", "button", "submit"}:
-                            continue
-                        if readonly in {"readonly", "true"} or disabled in {"disabled", "true"}:
-                            continue
-                        return candidate
-                    except Exception:
-                        continue
-            return None
-
-        try:
-            return wait.until(_find_input)
-        except Exception:
-            return None
+        return None
 
     def _enter_text_into_input(self, driver, input_element, value: str) -> bool:
         """Enters text into an input with JS fallback for strict Edge element-state checks."""
@@ -793,6 +862,7 @@ class MoodleCrawler:
     def _collect_pages_with_driver(self, driver, start_url: str) -> List[Tuple[str, str]]:
         """Collects Moodle pages by following candidate links in an authenticated browser session."""
         root_host = urlparse(start_url).netloc.lower()
+        self._wait_for_document_ready(driver)
         current_url = driver.current_url or start_url
         first_html = driver.page_source or ""
 
