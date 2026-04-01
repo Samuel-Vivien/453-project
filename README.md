@@ -30,6 +30,14 @@ Single-window desktop calendar built with Python + Tkinter.
    - then run `./Install\ Calendar\ App.command`
 6. The launcher activates `.venv` automatically and deactivates it when the app closes.
 
+### Linux
+
+1. Run `chmod +x "Install Calendar App.sh" "Run Calendar App.sh" "Uninstall Calendar App.sh"` once from the project folder if your desktop does not preserve executable permissions.
+2. Start the installer with `./Install\ Calendar\ App.sh`.
+3. After installation finishes, run `./Run\ Calendar\ App.sh` or double-click `Run Calendar App.sh` from your file manager.
+4. On supported distros, the installer automatically uses `apt-get`, `dnf`, `yum`, or `pacman` to install missing Python 3 / Tkinter / venv system packages.
+5. The launcher uses the project `.venv` automatically.
+
 ## Uninstall (One Click)
 
 ### Windows
@@ -41,6 +49,12 @@ Single-window desktop calendar built with Python + Tkinter.
 ### macOS
 
 1. Double-click `Uninstall Calendar App.command`.
+2. It removes `.venv` and Python cache files.
+3. It asks whether to also delete `calendar_items.json`.
+
+### Linux
+
+1. Run `./Uninstall\ Calendar\ App.sh`.
 2. It removes `.venv` and Python cache files.
 3. It asks whether to also delete `calendar_items.json`.
 
@@ -68,5 +82,6 @@ python3 calendar_app.py
 - If the Moodle page requires authentication, enter username/password in the same panel and import again.
 - For external SSO (for example Microsoft login), install Selenium once (`py -3 -m pip install selenium`) so the app can automate sign-in and import dates.
 - For external SSO browser automation, the app tries the user's system default browser first, then falls back to Safari on macOS or Edge on Windows.
+- On Linux, Tkinter may come from a distro package instead of pip; the Linux installer attempts to add it automatically on supported package managers.
 - During Microsoft SSO, the app waits up to 60 seconds for username correction, 60 seconds for password correction, and then 60 seconds for phone-based MFA approval.
 - Import/data errors open in a resizable window that can be closed at any time.
