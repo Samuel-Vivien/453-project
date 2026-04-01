@@ -10,8 +10,11 @@ from dataclasses import dataclass, asdict
 from datetime import date, timedelta
 import calendar
 import json
+import os
 from pathlib import Path
 import re
+import shutil
+import sys
 import tkinter as tk
 from tkinter import ttk
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -21,8 +24,80 @@ from typing import Dict, List, Optional, Tuple
 from moodle_crawler import MoodleCrawler, MoodleEvent
 
 
-DATA_FILE = Path(__file__).with_name("calendar_items.json")
+APP_NAME = "Desktop Calendar"
+DATA_FILENAME = "calendar_items.json"
 URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>\"']+)")
+
+
+def _source_app_dir() -> Path:
+    """Returns the source directory for the application code."""
+    return Path(__file__).resolve().parent
+
+
+def _runtime_app_dir() -> Path:
+    """Returns the directory containing the running app bundle or source file."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return _source_app_dir()
+
+
+def _get_user_data_dir() -> Path:
+    """Returns the per-user writable directory for packaged app data."""
+    if sys.platform.startswith("win"):
+        appdata_root = os.environ.get("APPDATA")
+        if appdata_root:
+            return Path(appdata_root) / APP_NAME
+        return Path.home() / "AppData" / "Roaming" / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home) / APP_NAME
+    return Path.home() / ".local" / "share" / APP_NAME
+
+
+def _migrate_packaged_data_file(target_file: Path) -> None:
+    """Copies legacy local data into the packaged app-data folder on first run."""
+    if target_file.exists():
+        return
+
+    candidate_paths = [
+        _runtime_app_dir() / DATA_FILENAME,
+        _source_app_dir() / DATA_FILENAME,
+    ]
+    seen_paths: set[Path] = set()
+    for candidate_path in candidate_paths:
+        normalized_candidate = candidate_path.resolve(strict=False)
+        if normalized_candidate in seen_paths:
+            continue
+        seen_paths.add(normalized_candidate)
+        if normalized_candidate == target_file.resolve(strict=False) or not candidate_path.exists():
+            continue
+        try:
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate_path, target_file)
+        except OSError:
+            pass
+        return
+
+
+def _resolve_data_file() -> Path:
+    """Finds a writable JSON data file location for both source and packaged runs."""
+    if not getattr(sys, "frozen", False):
+        return _source_app_dir() / DATA_FILENAME
+
+    target_file = _get_user_data_dir() / DATA_FILENAME
+    try:
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return _runtime_app_dir() / DATA_FILENAME
+
+    _migrate_packaged_data_file(target_file)
+    return target_file
+
+
+DATA_FILE = _resolve_data_file()
 
 LIGHT_THEME = {
     "bg": "#f4f6fb",
@@ -1410,7 +1485,7 @@ class CalendarApp(tk.Tk):
         self.next_item_id = max(next_id, max_seen_id + 1)
 
     def _save_items(self) -> None:
-        """Persists all calendar items to a JSON file beside the application."""
+        """Persists all calendar items to the active JSON data file."""
         serializable_map = {
             key: [asdict(item) for item in items]
             for key, items in self.items_by_day.items()

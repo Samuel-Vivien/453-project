@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 cd /d "%~dp0"
 
@@ -8,6 +8,8 @@ if exist ".venv\" (
     rmdir /s /q ".venv"
     if exist ".venv\" (
         echo Failed to remove ".venv".
+        echo.
+        pause
         exit /b 1
     )
     echo Removed ".venv".
@@ -25,10 +27,12 @@ del /s /q "*.pyo" >nul 2>&1
 echo [3/3] Local data cleanup (optional)
 if exist "calendar_items.json" (
     set /p REMOVE_DATA="Delete calendar_items.json too? (y/N): "
-    if /I "%REMOVE_DATA%"=="Y" (
+    if /I "!REMOVE_DATA!"=="Y" (
         del /q "calendar_items.json"
         if exist "calendar_items.json" (
             echo Failed to remove "calendar_items.json".
+            echo.
+            pause
             exit /b 1
         )
         echo Removed "calendar_items.json".
@@ -40,4 +44,6 @@ if exist "calendar_items.json" (
 )
 
 echo Uninstall complete.
+echo.
+pause
 exit /b 0

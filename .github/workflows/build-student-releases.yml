@@ -1,0 +1,69 @@
+name: Build Student Releases
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+            python_cmd: python
+            archive_name: Desktop Calendar Windows.zip
+            artifact_name: Desktop-Calendar-Windows
+          - os: macos-latest
+            label: macOS
+            python_cmd: python
+            archive_name: Desktop Calendar macOS.zip
+            artifact_name: Desktop-Calendar-macOS
+          - os: ubuntu-latest
+            label: Linux
+            python_cmd: python3
+            archive_name: Desktop Calendar Linux.zip
+            artifact_name: Desktop-Calendar-Linux
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-pip python3-venv python3-tk
+
+      - name: Upgrade pip
+        run: ${{ matrix.python_cmd }} -m pip install --upgrade pip
+
+      - name: Install app and build dependencies
+        run: ${{ matrix.python_cmd }} -m pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Verify tkinter is available
+        run: ${{ matrix.python_cmd }} -c "import tkinter; print(tkinter.TkVersion)"
+
+      - name: Build packaged student release
+        run: ${{ matrix.python_cmd }} build_student_release.py
+
+      - name: Upload zipped release
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/${{ matrix.archive_name }}
+          if-no-files-found: error
