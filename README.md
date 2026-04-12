@@ -1,12 +1,12 @@
 How to use:
-Step 1. Proceed to the release Branch
-Step 2. Open the Release folder.
-Step 3. Download attributed install folder for specified OS
-Step 4. Unzip the folders
-Step 5. Open the Desktop Calendar (insert_OS) folder
-Step 6 (Windows): Run the 'Install Dekstop Calendar.batch' file. Then wait for the install to complete and then run the 'Run Desktop Calendar' file.
-Step 6 (MacOS): Run the 'Install Dekstop Calendar.command' file. Mac OS will then warn user of potential virus, ignore this and go into your settings and in settings go to security. Scroll down until you see the file it blocked and click 'run anyway'. Then wait for the install to complete and then run the 'Run Desktop Calendar' file. (May need to proceed to settings again due to MacOS)
-Step 6 (Linux): using the terminal cd into the location of the 'Install Desktop Calendar.sh' and then run './'Install Desktop Calendar.sh''. Once install is complete, run the 'Run Desktop Calendar' file.
+- Step 1. Proceed to the release Branch
+- Step 2. Open the Release folder.
+- Step 3. Download attributed install folder for specified OS
+- Step 4. Unzip the folders
+- Step 5. Open the Desktop Calendar (insert_OS) folder
+- Step 6 (Windows): Run the 'Install Dekstop Calendar.batch' file. Then wait for the install to complete and then run the 'Run Desktop Calendar' file.
+- Step 6 (MacOS): Run the 'Install Dekstop Calendar.command' file. Mac OS will then warn user of potential virus, ignore this and go into your settings and in settings go to security. Scroll down until you see the file it blocked and click 'run anyway'. Then wait for the install to complete and then run the 'Run Desktop Calendar' file. (May need to proceed to settings again due to MacOS)
+- Step 6 (Linux): using the terminal cd into the location of the 'Install Desktop Calendar.sh' and then run './'Install Desktop Calendar.sh''. Once install is complete, run the 'Run Desktop Calendar' file.
 
 ## Notes
 
