@@ -1,2 +1,6 @@
 certifi>=2024.8.30
 selenium>=4.41.0
+requests>=2.30.0
+python-pptx>=0.6.21
+PyMuPDF>=1.22.0
+openai>=1.0.0

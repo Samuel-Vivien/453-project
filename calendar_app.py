@@ -19,19 +19,24 @@ import tkinter as tk
 from tkinter import ttk
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import webbrowser
-from typing import Dict, List, Optional, Tuple
-
 from moodle_crawler import MoodleCrawler, MoodleEvent
+from typing import Dict, List, Optional, Tuple
+import threading
+import os
+from tkinter import filedialog
+from tkinter import font as tkfont
 
-
+from ai_slides import (
+    summarize_from_url,
+    summarize_from_file,
+)
 APP_NAME = "Desktop Calendar"
-DATA_FILENAME = "calendar_items.json"
-URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>\"']+)")
-
 
 def _source_app_dir() -> Path:
     """Returns the source directory for the application code."""
     return Path(__file__).resolve().parent
+DATA_FILENAME = "calendar_items.json"
+URL_PATTERN = re.compile(r"(?i)\b((?:https?://|www\.)[^\s<>\"']+)")
 
 
 def _runtime_app_dir() -> Path:
@@ -342,6 +347,32 @@ class CalendarApp(tk.Tk):
             wraplength=320,
             style="Muted.TLabel",
         ).grid(row=4, column=0, columnspan=2, sticky="w")
+        # AI Slides section
+        ai_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
+        ttk.Label(ai_frame, text="AI Slides", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ai_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ai_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(ai_frame, text="Presentation File").grid(row=1, column=0, sticky="w", pady=(0, 4))
+        self.ai_url_var = tk.StringVar()
+        file_row = ttk.Frame(ai_frame)
+        file_row.grid(row=1, column=1, sticky="ew", pady=(0, 4))
+        file_row.columnconfigure(0, weight=1)
+        self.ai_url_entry = ttk.Entry(file_row, textvariable=self.ai_url_var)
+        self.ai_url_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Button(file_row, text="Browse…", command=self._browse_presentation_file).grid(row=0, column=1, sticky="e", padx=(6, 0))
+
+        btn_row = ttk.Frame(ai_frame, style="Panel.TFrame")
+        btn_row.grid(row=2, column=0, columnspan=2, sticky="ew")
+        btn_row.columnconfigure((0, 1), weight=1)
+        self.summarize_btn = ttk.Button(btn_row, text="Summarize Slides", command=self._on_summarize_slides)
+        self.summarize_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self.open_fullscreen_btn = ttk.Button(btn_row, text="Open Fullscreen", command=self._open_ai_fullscreen)
+        self.open_fullscreen_btn.grid(row=0, column=1, sticky="ew", padx=(4, 0))
+
+        self.ai_result_text = tk.Text(ai_frame, height=10, wrap="word")
+        self.ai_result_text.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(8, 0), padx=8)
+        ai_frame.rowconfigure(3, weight=1)
 
         self.clear_all_button = ttk.Button(
             moodle_frame,
@@ -818,6 +849,232 @@ class CalendarApp(tk.Tk):
         self._set_status(
             f"Imported {added_count} Moodle items. Updated {updated_count} existing items. Skipped {skipped_count} duplicates."
         )
+
+    def _browse_presentation_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select presentation file",
+            filetypes=(
+                ("Presentations and PDFs", "*.pptx *.ppt *.pdf"),
+                ("All files", "*.*"),
+            ),
+        )
+        if path:
+            self.ai_url_var.set(path)
+
+    def _on_summarize_slides(self) -> None:
+        url = self.ai_url_var.get().strip()
+        if not url:
+            self._set_status("Choose a presentation file first.")
+            return
+        self._set_status("Summarizing slides...")
+        self.ai_result_text.delete("1.0", tk.END)
+        # disable AI buttons while running
+        try:
+            self.summarize_btn.config(state="disabled")
+            self.open_fullscreen_btn.config(state="disabled")
+        except Exception:
+            pass
+        threading.Thread(target=self._summarize_worker, args=(url,), daemon=True).start()
+
+    def _summarize_worker(self, url_or_path: str) -> None:
+        import traceback
+
+        summary = None
+        try:
+            self.after(0, lambda: self._set_status("Reading file for summarization..."))
+            if os.path.exists(url_or_path):
+                self.after(0, lambda: self._set_status("Extracting text from file..."))
+                summary = summarize_from_file(url_or_path)
+            else:
+                self.after(0, lambda: self._set_status("Downloading and extracting slides..."))
+                summary = summarize_from_url(url_or_path)
+            self.after(0, lambda: self._set_status("Formatting summary..."))
+        except Exception as exc:
+            tb = traceback.format_exc()
+            print("Summarize worker exception:\n", tb)
+            # show detailed error to user
+            self.after(0, lambda: self._show_error(f"AI summarize error:\n{tb}", "AI Error"))
+            self.after(0, lambda: self._set_status("Summarize failed."))
+            summary = None
+        finally:
+            # re-enable buttons on main thread
+            self.after(0, lambda: self.summarize_btn.config(state="normal"))
+            self.after(0, lambda: self.open_fullscreen_btn.config(state="normal"))
+
+        if summary is not None:
+            self.after(0, lambda: self._display_ai_result(summary))
+            self.after(0, lambda: self._set_status("AI summary ready."))
+
+    def _on_generate_questions(self) -> None:
+        # Generate Questions feature removed — kept for backward compatibility placeholder.
+        self._set_status("Generate Questions removed. Use Summarize Slides.")
+
+    def _questions_worker(self, url_or_path: str) -> None:
+        # Question generation worker removed.
+        self.after(0, lambda: self._set_status("Generate Questions removed."))
+
+    def _display_ai_result(self, content: str) -> None:
+        self._ensure_ai_fonts()
+        self.ai_result_text.config(state="normal")
+        # ensure readable font and spacing in embedded view
+        try:
+            self.ai_result_text.configure(font=self._ai_fonts["body"])
+        except Exception:
+            pass
+        self.ai_result_text.delete("1.0", tk.END)
+        mode = getattr(self, "ai_format_var", None)
+        mode_val = mode.get() if mode is not None else "Sections"
+        self._format_and_insert_text(self.ai_result_text, content, compact=True, mode=mode_val)
+        self.ai_result_text.config(state="disabled")
+        self._set_status("AI content ready")
+
+    def _ensure_ai_fonts(self) -> None:
+        if hasattr(self, "_ai_fonts"):
+            return
+        base = tkfont.nametofont("TkDefaultFont")
+        self._ai_fonts = {
+            "heading": tkfont.Font(family=base.cget("family"), size=max(base.cget("size") + 6, 14), weight="bold"),
+            "body": tkfont.Font(family=base.cget("family"), size=base.cget("size") + 2),
+            "mono": tkfont.Font(family="Consolas" if os.name == "nt" else "Courier", size=base.cget("size") + 1),
+        }
+
+    def _format_and_insert_text(self, widget: tk.Text, content: str, compact: bool = False, mode: str = "Sections") -> None:
+        """Insert `content` into `widget` with simple formatting: heading, bullets, paragraphs.
+
+        If `compact` is True use slightly smaller spacing for the embedded panel.
+        """
+        self._ensure_ai_fonts()
+        widget.tag_configure("heading", font=self._ai_fonts["heading"], spacing1=6, spacing3=12)
+        widget.tag_configure(
+            "para",
+            font=self._ai_fonts["body"],
+            lmargin1=4,
+            lmargin2=8,
+            spacing1=4,
+            spacing3=(8 if compact else 14),
+        )
+        widget.tag_configure(
+            "bullet",
+            font=self._ai_fonts["body"],
+            lmargin1=20,
+            lmargin2=36,
+            spacing1=2,
+            spacing3=(6 if compact else 10),
+        )
+        widget.tag_configure(
+            "code",
+            font=self._ai_fonts["mono"],
+            background=self.theme.get("panel_alt", "#f0f0f0"),
+            lmargin1=6,
+            lmargin2=6,
+            spacing3=(6 if compact else 10),
+        )
+
+        lines = [ln.rstrip() for ln in content.splitlines()]
+        # If the user prefers sentence-mode, split into sentences instead of sections.
+        if mode is not None and mode.lower().startswith("senten"):
+            import re
+
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', content) if s.strip()]
+            for sent in sentences:
+                widget.insert(tk.END, sent + "\n", "para")
+            return
+        # Find first non-empty line and treat it as a heading if it's short
+        idx = 0
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+
+        if idx < len(lines):
+            first = lines[idx].strip()
+            if len(first) <= 120 and (len(content) > len(first) + 40):
+                widget.insert(tk.END, first + "\n\n", "heading")
+                idx += 1
+
+        para_lines: List[str] = []
+        for i in range(idx, len(lines)):
+            line = lines[i]
+            if not line.strip():
+                if para_lines:
+                    paragraph = "\n".join(para_lines).strip()
+                    # bullets inside paragraph
+                    for pl in paragraph.splitlines():
+                        pls = pl.strip()
+                        if pls.startswith("-") or pls.startswith("*"):
+                            widget.insert(tk.END, "• " + pls.lstrip("-* ") + "\n", "bullet")
+                        elif pls.startswith("    ") or pls.startswith("\t"):
+                            widget.insert(tk.END, pls + "\n", "code")
+                        else:
+                            widget.insert(tk.END, pls + "\n", "para")
+                    widget.insert(tk.END, "\n")
+                    para_lines = []
+                continue
+
+            para_lines.append(line)
+
+        if para_lines:
+            paragraph = "\n".join(para_lines).strip()
+            for pl in paragraph.splitlines():
+                pls = pl.strip()
+                if pls.startswith("-") or pls.startswith("*"):
+                    widget.insert(tk.END, "• " + pls.lstrip("-* ") + "\n", "bullet")
+                elif pls.startswith("    ") or pls.startswith("\t"):
+                    widget.insert(tk.END, pls + "\n", "code")
+                else:
+                    widget.insert(tk.END, pls + "\n", "para")
+
+    def _open_ai_fullscreen(self) -> None:
+        content = self.ai_result_text.get("1.0", "end-1c").strip()
+        if not content:
+            self._set_status("No AI content to show.")
+            return
+
+        win = tk.Toplevel(self)
+        win.title("AI Result")
+        # try fullscreen, fall back to maximized
+        try:
+            win.attributes("-fullscreen", True)
+        except Exception:
+            try:
+                win.state("zoomed")
+            except Exception:
+                # best-effort sizing
+                w = self.winfo_screenwidth()
+                h = self.winfo_screenheight()
+                win.geometry(f"{w}x{h}+0+0")
+
+        frame = ttk.Frame(win)
+        frame.grid(row=0, column=0, sticky="nsew")
+        win.columnconfigure(0, weight=1)
+        win.rowconfigure(0, weight=1)
+
+        text = tk.Text(frame, wrap="word")
+        text.grid(row=0, column=0, sticky="nsew", padx=12, pady=8)
+        # format using the same routine so fullscreen looks good
+        self._ensure_ai_fonts()
+        try:
+            text.configure(font=self._ai_fonts["body"])
+        except Exception:
+            pass
+        mode = getattr(self, "ai_format_var", None)
+        mode_val = mode.get() if mode is not None else "Sections"
+        # enable, insert formatted text, then disable
+        text.config(state="normal")
+        self._format_and_insert_text(text, content, compact=False, mode=mode_val)
+        text.config(state="disabled")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        btn_row = ttk.Frame(frame)
+        btn_row.grid(row=1, column=0, sticky="ew", pady=8)
+        ttk.Button(btn_row, text="Close", command=win.destroy).grid(row=0, column=0, sticky="e")
+
+        def _on_escape(event: object) -> None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        win.bind("<Escape>", _on_escape)
 
     def _sanitize_user_message(self, message: str) -> str:
         """Converts technical exceptions into clean, user-facing status text."""
