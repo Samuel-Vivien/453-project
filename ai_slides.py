@@ -200,37 +200,62 @@ def summarize_text(text: str, max_tokens: int = 300) -> str:
         except Exception:
             return _local_summarize(text)
 
-    # Heuristic fallback: take lead sentences from slides and group into paragraphs
+    # Heuristic fallback: richer extractive summarization (local, free)
     slides = [s.strip() for s in re.split(r"\n{2,}", text) if s.strip()]
     import html
 
-    lead_sentences: List[str] = []
-    for s in slides:
-        parts = re.split(r'(?<=[.!?])\s+', s.strip())
-        if parts:
-            sent = parts[0].strip()
-            sent = html.unescape(sent)
-            if len(sent) > 400:
-                sent = sent[:400].rsplit(" ", 1)[0] + "..."
-            if sent and sent[-1] not in ".!?":
-                sent = sent + "."
-            lead_sentences.append(sent)
-        if len(lead_sentences) >= 600:
-            break
+    # Build sentence list (keep original order and slide mapping)
+    sentences: List[str] = []
+    slide_map: List[int] = []
+    for si, s in enumerate(slides, start=1):
+        parts = [p.strip() for p in re.split(r'(?<=[.!?])\s+', s) if p.strip()]
+        for p in parts:
+            p_clean = html.unescape(p)
+            p_clean = re.sub(r"\s+", " ", p_clean).strip()
+            if p_clean:
+                sentences.append(p_clean)
+                slide_map.append(si)
 
-    if not lead_sentences:
+    if not sentences:
         return _local_summarize(text)
 
-    paras: List[str] = []
-    per_para = 4
-    for p_idx, i in enumerate(range(0, len(lead_sentences), per_para)):
-        group = lead_sentences[i : i + per_para]
-        para = " ".join(group)
-        slide_num = i + 1
-        paras.append(f"Slide {slide_num}: {para}")
+    # Simple term-frequency scoring (exclude stopwords)
+    stopwords = {
+        'the','and','is','in','to','of','a','for','that','on','with','as','are','be','this','by','an','or','from','it','at'
+    }
+    freq = {}
+    for s in sentences:
+        for w in re.findall(r"\w+", s.lower()):
+            if w in stopwords or len(w) < 3:
+                continue
+            freq[w] = freq.get(w, 0) + 1
 
-    max_paras = 6
-    paras = paras[:max_paras]
+    sent_scores = []
+    for s in sentences:
+        score = 0
+        for w in re.findall(r"\w+", s.lower()):
+            score += freq.get(w, 0)
+        sent_scores.append(score)
+
+    # choose number of sentences based on requested depth (max_tokens hint)
+    target_sentences = min(max(6, int(max_tokens / 30)), len(sentences))
+
+    # pick top-scoring sentences but preserve original order
+    ranked_idx = sorted(range(len(sentences)), key=lambda i: sent_scores[i], reverse=True)
+    selected_idx = sorted(ranked_idx[:target_sentences])
+
+    # group into paragraphs of 3 sentences each and prefix with slide numbers
+    paras: List[str] = []
+    per_para = 3
+    for i in range(0, len(selected_idx), per_para):
+        group_idx = selected_idx[i : i + per_para]
+        group_sents = [sentences[j] for j in group_idx]
+        slide_nums = sorted({slide_map[j] for j in group_idx})
+        slide_label = f"Slides {slide_nums[0]}" if len(slide_nums) == 1 else f"Slides {slide_nums[0]}-{slide_nums[-1]}"
+        paras.append(f"{slide_label}: " + " ".join(group_sents))
+
+    # Limit total paragraphs to keep output readable but more in-depth than before
+    paras = paras[:8]
     paras = [re.sub(r"\s+", " ", p).strip() for p in paras]
 
     return "\n\n".join(paras)
