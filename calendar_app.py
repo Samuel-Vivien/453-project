@@ -23,8 +23,38 @@ from moodle_crawler import MoodleCrawler, MoodleEvent
 from typing import Dict, List, Optional, Tuple
 import threading
 import os
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from tkinter import font as tkfont
+
+
+class _Tooltip:
+    """Simple tooltip implementation for Tkinter widgets."""
+
+    def __init__(self, widget, text: str = "") -> None:
+        self.widget = widget
+        self.text = text
+        self.tipwindow: Optional[tk.Toplevel] = None
+        self.widget.bind("<Enter>", self._enter)
+        self.widget.bind("<Leave>", self._leave)
+
+    def _enter(self, _event: object) -> None:
+        if self.tipwindow:
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.tipwindow = tk.Toplevel(self.widget)
+        self.tipwindow.wm_overrideredirect(True)
+        self.tipwindow.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(self.tipwindow, text=self.text, justify="left", bg="#ffffe0", relief="solid", borderwidth=1)
+        label.pack(ipadx=6, ipady=3)
+
+    def _leave(self, _event: object) -> None:
+        if self.tipwindow:
+            try:
+                self.tipwindow.destroy()
+            except Exception:
+                pass
+        self.tipwindow = None
 
 from ai_slides import (
     summarize_from_url,
@@ -189,12 +219,28 @@ class CalendarApp(tk.Tk):
         self._due_reminder_after_id: Optional[str] = None
         self._clear_all_confirm_pending = False
         self._clear_all_reset_after_id: Optional[str] = None
+        # Safety: keep last saved payload for undo and backups
+        self._last_saved_payload: Optional[str] = None
+        self._undo_button: Optional[ttk.Button] = None
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
 
         self.style = ttk.Style(self)
         self.style.theme_use("clam")
 
         self._build_layout()
+        # Accessibility: keyboard shortcuts for navigation and item actions
+        self.bind("<Left>", lambda e: self._move_selection_by_offset(-1))
+        self.bind("<Right>", lambda e: self._move_selection_by_offset(1))
+        self.bind("<Up>", lambda e: self._move_selection_by_offset(-7))
+        self.bind("<Down>", lambda e: self._move_selection_by_offset(7))
+        # Month navigation with Ctrl+Left/Right
+        self.bind("<Control-Left>", lambda e: self._go_previous_month())
+        self.bind("<Control-Right>", lambda e: self._go_next_month())
+        self.bind("<Return>", self._on_enter_pressed)
+        self.bind("<Delete>", self._on_delete_pressed)
+        # PageUp/PageDown navigate items when the item list has focus
+        self.bind("<Prior>", lambda e: self._select_prev_item())
+        self.bind("<Next>", lambda e: self._select_next_item())
         self._apply_theme()
         self._load_items()
         removed_count = self._dedupe_existing_import_items()
@@ -256,6 +302,9 @@ class CalendarApp(tk.Tk):
                 command=lambda pos=idx: self._select_day_from_button(pos),
             )
             btn.grid(row=row, column=col, sticky="nsew", padx=2, pady=2, ipadx=2, ipady=10)
+            # show hover preview of items for accessibility and quick scan
+            btn.bind("<Enter>", lambda e, i=idx: self._show_day_preview(i))
+            btn.bind("<Leave>", lambda e: self._hide_day_preview())
             self.day_buttons.append(btn)
 
         side_panel = ttk.Frame(self, padding=14, style="Panel.TFrame")
@@ -272,13 +321,21 @@ class CalendarApp(tk.Tk):
         items_frame.columnconfigure(0, weight=1)
         items_frame.rowconfigure(0, weight=1)
 
+        
+
         self.item_list = tk.Listbox(items_frame, height=10, exportselection=False)
-        self.item_list.grid(row=0, column=0, sticky="nsew")
+        self.item_list.grid(row=1, column=0, sticky="nsew")
         self.item_list.bind("<<ListboxSelect>>", self._on_item_selected)
 
         list_scroll = ttk.Scrollbar(items_frame, orient="vertical", command=self.item_list.yview)
-        list_scroll.grid(row=0, column=1, sticky="ns")
+        list_scroll.grid(row=1, column=1, sticky="ns")
         self.item_list.config(yscrollcommand=list_scroll.set)
+
+        # Search / filter for items in selected day
+        self.search_var = tk.StringVar()
+        self.search_entry = ttk.Entry(items_frame, textvariable=self.search_var)
+        self.search_entry.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.search_entry.bind("<KeyRelease>", lambda e: self._apply_search_filter())
 
         editor_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
         ttk.Label(editor_frame, text="View / Edit Item", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
@@ -300,6 +357,15 @@ class CalendarApp(tk.Tk):
         self.details_text.grid(row=2, column=1, sticky="nsew", pady=(0, 4))
         self.details_text.bind("<KeyRelease>", self._on_details_changed)
         editor_frame.rowconfigure(2, weight=1)
+        editor_frame.columnconfigure(2, weight=0)
+
+        # Prev/Next buttons placed next to the Details editor for per-day item navigation
+        nav_btn_frame = ttk.Frame(editor_frame)
+        nav_btn_frame.grid(row=2, column=2, sticky="ns", padx=(8, 0))
+        self.prev_item_btn = ttk.Button(nav_btn_frame, text="◀", width=3, command=self._select_prev_item)
+        self.prev_item_btn.grid(row=0, column=0, pady=(0, 6))
+        self.next_item_btn = ttk.Button(nav_btn_frame, text="▶", width=3, command=self._select_next_item)
+        self.next_item_btn.grid(row=1, column=0)
 
         action_frame = ttk.Frame(editor_frame, style="Panel.TFrame")
         action_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
@@ -334,9 +400,8 @@ class CalendarApp(tk.Tk):
         self.moodle_password_entry = ttk.Entry(moodle_frame, textvariable=self.moodle_password_var, show="*")
         self.moodle_password_entry.grid(row=2, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Button(moodle_frame, text="Import Moodle Dates", command=self._import_moodle_dates).grid(
-            row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4)
-        )
+        self.import_moodle_btn = ttk.Button(moodle_frame, text="Import Moodle Dates", command=self._import_moodle_dates)
+        self.import_moodle_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 4))
 
         self.moodle_info_var = tk.StringVar(
             value="Imports homework/assignment due dates from Moodle text content."
@@ -380,6 +445,27 @@ class CalendarApp(tk.Tk):
             command=self._on_clear_all_requested,
         )
         self.clear_all_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+        # (Import/Export removed)
+
+        self.restore_backup_button = ttk.Button(moodle_frame, text="Restore Backup…", command=self._restore_backup)
+        self.restore_backup_button.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+        # Tooltips for primary actions
+        try:
+            _Tooltip(self.prev_btn, "Previous month (Left / Ctrl+Left)")
+            _Tooltip(self.next_btn, "Next month (Right / Ctrl+Right)")
+            _Tooltip(self.theme_button, "Toggle light/dark theme")
+            _Tooltip(self.add_button, "Add item (Enter)")
+            _Tooltip(self.delete_button, "Remove selected item (Delete)")
+            _Tooltip(self.clear_all_button, "Clear all saved calendar data (with confirmation)")
+            _Tooltip(self.prev_item_btn, "Show previous item on selected day (PageUp)")
+            _Tooltip(self.next_item_btn, "Show next item on selected day (PageDown)")
+            _Tooltip(self.restore_backup_button, "Restore from a timestamped backup file")
+            _Tooltip(self.import_moodle_btn, "Import due dates from Moodle pages")
+            _Tooltip(self.summarize_btn, "Summarize selected presentation with AI")
+        except Exception:
+            pass
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_label = tk.Label(self, textvariable=self.status_var, anchor="w", padx=8, pady=6)
@@ -587,14 +673,255 @@ class CalendarApp(tk.Tk):
         self._refresh_selected_day_label()
         self._refresh_item_list()
 
+    def _move_selection_by_offset(self, offset: int) -> None:
+        """Move the selected day by an offset within the visible calendar grid."""
+        # find current index
+        current_idx = None
+        for idx, d in self._button_dates.items():
+            if d is not None and d == self.selected_date:
+                current_idx = idx
+                break
+        if current_idx is None:
+            return
+        target = current_idx + offset
+        # clamp and search nearest valid
+        while 0 <= target < len(self.day_buttons):
+            mapped = self._button_dates.get(target)
+            if mapped is not None:
+                self._select_day_from_button(target)
+                return
+            target += (1 if offset > 0 else -1)
+
+    def _show_day_preview(self, idx: int) -> None:
+        """Shows a small popup listing items for the hovered day button."""
+        mapped = self._button_dates.get(idx)
+        if mapped is None:
+            return
+        items = self.items_by_day.get(self._date_key(mapped), [])
+        if not items:
+            return
+        try:
+            widget = self.day_buttons[idx]
+            text = "\n".join(f"[{it.time_label}] {it.title}" if it.time_label else it.title for it in items)
+            # reuse tooltip class for preview
+            if not hasattr(self, "_day_preview_tooltip") or self._day_preview_tooltip is None:
+                self._day_preview_tooltip = _Tooltip(widget, text)
+            else:
+                # update text by recreating
+                try:
+                    self._day_preview_tooltip._leave(None)
+                except Exception:
+                    pass
+                self._day_preview_tooltip = _Tooltip(widget, text)
+        except Exception:
+            pass
+
+    def _hide_day_preview(self) -> None:
+        try:
+            if hasattr(self, "_day_preview_tooltip") and self._day_preview_tooltip is not None:
+                self._day_preview_tooltip._leave(None)
+                self._day_preview_tooltip = None
+        except Exception:
+            pass
+
+    def _apply_search_filter(self) -> None:
+        """Filters items shown in the sidebar listbox for the selected day."""
+        term = (self.search_var.get() or "").strip().lower()
+        # if placeholder text is present, ignore
+        if term == "filter items...":
+            term = ""
+        self.item_list.delete(0, tk.END)
+        day_items = self.items_by_day.get(self._date_key(self.selected_date), [])
+        for item in day_items:
+            time_part = f"[{item.time_label}] " if item.time_label.strip() else ""
+            display = f"{time_part}{item.title}"
+            details = (item.details or "").lower()
+            if not term or term in display.lower() or term in details:
+                self.item_list.insert(tk.END, display)
+
     def _select_day_from_button(self, idx: int) -> None:
         """Updates the active date based on the clicked calendar button."""
         mapped_date = self._button_dates.get(idx)
         if mapped_date is None:
             return
+        # Select the date and show its items in the right-side panel.
         self.selected_date = mapped_date
         self._refresh_calendar()
+        try:
+            self._apply_search_filter()
+            if self.item_list.size() > 0:
+                # focus and auto-select the first item so editor is populated
+                self.item_list.focus_set()
+                try:
+                    self.item_list.selection_clear(0, tk.END)
+                    self.item_list.selection_set(0)
+                    self.item_list.see(0)
+                    # directly load the selected item into the editor
+                    self._on_item_selected(None)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         self._set_status(f"Selected {self.selected_date.isoformat()}")
+
+    def _open_day_modal(self, day_value: date) -> None:
+        """Opens a modal dialog showing items for `day_value` and allows editing.
+
+        The dialog is transient and grabs focus; the main window is blocked until
+        the dialog is closed to meet the requested workflow.
+        """
+        if hasattr(self, "_day_modal") and self._day_modal is not None and self._day_modal.winfo_exists():
+            try:
+                self._day_modal.lift()
+            except Exception:
+                pass
+            return
+
+        self.selected_date = day_value
+        self._refresh_calendar()
+
+        modal = tk.Toplevel(self)
+        self._day_modal = modal
+        modal.title(f"Day View — {day_value.strftime('%A, %b %d, %Y')}")
+        # position on the right side of the main window
+        try:
+            self.update_idletasks()
+            main_x = self.winfo_rootx()
+            main_y = self.winfo_rooty()
+            main_w = self.winfo_width()
+            main_h = self.winfo_height()
+            modal_w = max(420, int(main_w * 0.35))
+            modal_h = max(360, int(main_h * 0.7))
+            geom_x = main_x + main_w - modal_w - 20
+            geom_y = main_y + 40
+            modal.geometry(f"{modal_w}x{modal_h}+{geom_x}+{geom_y}")
+        except Exception:
+            pass
+
+        modal.transient(self)
+        modal.grab_set()
+        modal.columnconfigure(0, weight=1)
+        modal.rowconfigure(1, weight=1)
+
+        header = ttk.Label(modal, text=f"Items for {day_value.strftime('%A, %b %d, %Y')}", font=(None, 12, "bold"))
+        header.grid(row=0, column=0, sticky="w", padx=12, pady=(8, 4))
+
+        list_frame = ttk.Frame(modal)
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=12, pady=4)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+
+        day_list = tk.Listbox(list_frame, exportselection=False)
+        day_list.grid(row=0, column=0, sticky="nsew")
+
+        scroll = ttk.Scrollbar(list_frame, orient="vertical", command=day_list.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        day_list.config(yscrollcommand=scroll.set)
+
+        editor = ttk.Frame(modal)
+        editor.grid(row=2, column=0, sticky="ew", padx=12, pady=(6, 8))
+        editor.columnconfigure(1, weight=1)
+
+        ttk.Label(editor, text="Title").grid(row=0, column=0, sticky="w")
+        m_title = tk.StringVar()
+        m_title_entry = ttk.Entry(editor, textvariable=m_title)
+        m_title_entry.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        ttk.Label(editor, text="Time").grid(row=1, column=0, sticky="w")
+        m_time = tk.StringVar()
+        m_time_entry = ttk.Entry(editor, textvariable=m_time)
+        m_time_entry.grid(row=1, column=1, sticky="ew", padx=(6, 0))
+
+        ttk.Label(editor, text="Details").grid(row=2, column=0, sticky="nw")
+        m_details = tk.Text(editor, height=6, wrap="word")
+        m_details.grid(row=2, column=1, sticky="nsew", padx=(6, 0))
+
+        btn_row = ttk.Frame(modal)
+        btn_row.grid(row=3, column=0, sticky="e", padx=12, pady=(6, 12))
+
+        def _refresh_day_list():
+            day_list.delete(0, tk.END)
+            items = self.items_by_day.get(self._date_key(day_value), [])
+            for it in items:
+                prefix = f"[{it.time_label}] " if it.time_label.strip() else ""
+                day_list.insert(tk.END, prefix + it.title)
+
+        def _on_day_selected(_ev=None):
+            sel = day_list.curselection()
+            if not sel:
+                m_title.set("")
+                m_time.set("")
+                m_details.delete("1.0", tk.END)
+                return
+            idx = int(sel[0])
+            items = self.items_by_day.get(self._date_key(day_value), [])
+            if not (0 <= idx < len(items)):
+                return
+            it = items[idx]
+            m_title.set(it.title)
+            m_time.set(it.time_label)
+            m_details.delete("1.0", tk.END)
+            m_details.insert("1.0", it.details)
+
+        def _add_modal_item():
+            title = m_title.get().strip()
+            if not title:
+                self._set_status("Title required to add item.")
+                return
+            itm = CalendarItem(item_id=self.next_item_id, title=title, details=m_details.get("1.0", tk.END).strip(), time_label=m_time.get().strip())
+            self.next_item_id += 1
+            key = self._date_key(day_value)
+            self.items_by_day.setdefault(key, []).append(itm)
+            self._save_items()
+            _refresh_day_list()
+            self._refresh_calendar()
+            self._set_status(f"Added item for {key}")
+
+        def _update_modal_item():
+            sel = day_list.curselection()
+            if not sel:
+                self._set_status("Select an item to update.")
+                return
+            idx = int(sel[0])
+            key = self._date_key(day_value)
+            items = self.items_by_day.get(key, [])
+            if not (0 <= idx < len(items)):
+                return
+            items[idx].title = m_title.get().strip()
+            items[idx].time_label = m_time.get().strip()
+            items[idx].details = m_details.get("1.0", tk.END).strip()
+            self._save_items()
+            _refresh_day_list()
+            self._refresh_calendar()
+            self._set_status(f"Updated item for {key}")
+
+        def _remove_modal_item():
+            sel = day_list.curselection()
+            if not sel:
+                self._set_status("Select an item to remove.")
+                return
+            idx = int(sel[0])
+            key = self._date_key(day_value)
+            items = self.items_by_day.get(key, [])
+            if not (0 <= idx < len(items)):
+                return
+            removed = items.pop(idx)
+            if not items:
+                self.items_by_day.pop(key, None)
+            self._save_items()
+            _refresh_day_list()
+            self._refresh_calendar()
+            self._set_status(f"Removed '{removed.title}' from {key}")
+
+        day_list.bind("<<ListboxSelect>>", _on_day_selected)
+
+        ttk.Button(btn_row, text="Add", command=_add_modal_item).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(btn_row, text="Update", command=_update_modal_item).grid(row=0, column=1, padx=(0, 6))
+        ttk.Button(btn_row, text="Remove", command=_remove_modal_item).grid(row=0, column=2, padx=(0, 6))
+        ttk.Button(btn_row, text="Close", command=lambda: (modal.grab_release(), modal.destroy())).grid(row=0, column=3)
+
+        _refresh_day_list()
+        m_title_entry.focus_set()
 
     def _refresh_selected_day_label(self) -> None:
         """Updates the sidebar header with the currently selected day."""
@@ -602,11 +929,8 @@ class CalendarApp(tk.Tk):
 
     def _refresh_item_list(self) -> None:
         """Rebuilds the listbox with all items for the selected day."""
-        self.item_list.delete(0, tk.END)
-        day_items = self.items_by_day.get(self._date_key(self.selected_date), [])
-        for item in day_items:
-            time_part = f"[{item.time_label}] " if item.time_label.strip() else ""
-            self.item_list.insert(tk.END, f"{time_part}{item.title}")
+        # Use the shared search/filter routine so the displayed list respects filters
+        self._apply_search_filter()
         self._clear_editor(keep_status=True)
 
     def _on_item_selected(self, _event: object) -> None:
@@ -722,6 +1046,8 @@ class CalendarApp(tk.Tk):
             self._set_status("Click 'Confirm Clear All' within 8 seconds to reset all calendar data.")
             return
 
+        # Backup current data before clearing so undo is possible
+        backup_path = self._backup_before_clear()
         day_count = len(self.items_by_day)
         item_count = sum(len(items) for items in self.items_by_day.values())
         self.items_by_day.clear()
@@ -732,6 +1058,18 @@ class CalendarApp(tk.Tk):
         self._refresh_upcoming_due_notice()
         self._clear_editor(keep_status=True)
         self._set_status(f"Cleared {item_count} items across {day_count} day(s).")
+
+        # Show transient Undo button to restore last payload
+        try:
+            if self._undo_button is None or not self._undo_button.winfo_exists():
+                self._undo_button = ttk.Button(self, text="Undo Clear", command=self._undo_clear)
+                self._undo_button.grid(row=1, column=1, sticky="e", padx=8)
+                # hide undo after 10s
+                self.after(10000, lambda: (self._undo_button.destroy() if self._undo_button is not None else None))
+            if backup_path is not None:
+                self._set_status(self.status_var.get() + f" Backup: {backup_path.name}")
+        except Exception:
+            pass
 
     def _reset_clear_all_confirmation(self, timeout_notice: bool = False) -> None:
         """Resets clear-all confirmation state and restores default button text."""
@@ -812,6 +1150,15 @@ class CalendarApp(tk.Tk):
         username = self.moodle_username_var.get().strip()
         password = self.moodle_password_var.get()
         self._set_status("Reading Moodle pages...")
+        # feedback: disable import button and show busy cursor
+        try:
+            self.import_moodle_btn.config(state="disabled")
+        except Exception:
+            pass
+        try:
+            self.config(cursor="watch")
+        except Exception:
+            pass
         self.update_idletasks()
 
         try:
@@ -827,6 +1174,15 @@ class CalendarApp(tk.Tk):
             self._set_status(safe_message)
             self._show_error(safe_message, "Moodle Import Error")
             return
+        finally:
+            try:
+                self.import_moodle_btn.config(state="normal")
+            except Exception:
+                pass
+            try:
+                self.config(cursor="")
+            except Exception:
+                pass
 
         safe_message = self._sanitize_user_message(message)
         if login_required:
@@ -1116,6 +1472,55 @@ class CalendarApp(tk.Tk):
         if len(sanitized) > 320:
             return f"{sanitized[:317].rstrip()}..."
         return sanitized
+
+    def _restore_backup(self) -> None:
+        """Allow the user to choose a timestamped backup file to restore from."""
+        backup_dir = DATA_FILE.parent
+        initialdir = str(backup_dir) if backup_dir.exists() else str(Path.home())
+        path = filedialog.askopenfilename(
+            title="Restore backup",
+            initialdir=initialdir,
+            filetypes=(("JSON files", "*.json"), ("All files", "*.*")),
+        )
+        if not path:
+            self._set_status("Restore cancelled.")
+            return
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as exc:
+            self._show_error(str(exc), "Restore Error")
+            self._set_status("Restore failed.")
+            return
+
+        # Confirm with user before overwriting
+        confirm = tk.messagebox.askyesno("Restore Backup", f"Restore data from {os.path.basename(path)}? This will overwrite current data.")
+        if not confirm:
+            self._set_status("Restore cancelled.")
+            return
+
+        loaded_map = payload.get("items_by_day", {})
+        parsed_map: Dict[str, List[CalendarItem]] = {}
+        for key, raw_items in loaded_map.items():
+            if not isinstance(raw_items, list):
+                continue
+            parsed_items = []
+            for raw in raw_items:
+                if not isinstance(raw, dict) or "title" not in raw or "item_id" not in raw:
+                    continue
+                parsed_items.append(CalendarItem.from_dict(raw))
+            if parsed_items:
+                parsed_map[str(key)] = parsed_items
+
+        self.items_by_day = parsed_map
+        max_seen_id = max(
+            (item.item_id for group in self.items_by_day.values() for item in group),
+            default=0,
+        )
+        self.next_item_id = max(max_seen_id + 1, payload.get("next_item_id", 1))
+        self._save_items()
+        self._refresh_calendar()
+        self._refresh_upcoming_due_notice()
+        self._set_status(f"Restored backup from {os.path.basename(path)}")
 
     def _store_moodle_events(self, events: List[MoodleEvent]) -> tuple[int, int, int]:
         """Adds parsed Moodle events and upgrades duplicate source URLs when possible."""
@@ -1752,11 +2157,118 @@ class CalendarApp(tk.Tk):
             "items_by_day": serializable_map,
         }
         try:
-            DATA_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            # keep last payload in-memory for quick undo and safety
+            self._last_saved_payload = json.dumps(payload, indent=2)
+            DATA_FILE.write_text(self._last_saved_payload, encoding="utf-8")
         except OSError:
             message = "Could not save data to disk."
             self._set_status(message)
             self._show_error(message, "Save Error")
+
+    def _backup_before_clear(self) -> Optional[Path]:
+        """Write a timestamped backup of the current data file and keep payload in memory."""
+        try:
+            # ensure latest saved payload is current
+            if self._last_saved_payload is None:
+                # attempt to build payload
+                serializable_map = {
+                    key: [asdict(item) for item in items]
+                    for key, items in self.items_by_day.items()
+                }
+                backup_payload = {
+                    "next_item_id": self.next_item_id,
+                    "items_by_day": serializable_map,
+                }
+                self._last_saved_payload = json.dumps(backup_payload, indent=2)
+
+            backup_dir = DATA_FILE.parent
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            from datetime import datetime
+
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            backup_path = backup_dir / f"calendar_backup_{ts}.json"
+            backup_path.write_text(self._last_saved_payload or "{}", encoding="utf-8")
+            return backup_path
+        except Exception:
+            return None
+
+    def _undo_clear(self) -> None:
+        """Restore last saved payload (undo clear-all) if available."""
+        if not self._last_saved_payload:
+            self._set_status("Nothing to undo.")
+            return
+        try:
+            payload = json.loads(self._last_saved_payload)
+            loaded_map = payload.get("items_by_day", {})
+            parsed_map: Dict[str, List[CalendarItem]] = {}
+            for key, raw_items in loaded_map.items():
+                if not isinstance(raw_items, list):
+                    continue
+                parsed_items = []
+                for raw in raw_items:
+                    if not isinstance(raw, dict) or "title" not in raw or "item_id" not in raw:
+                        continue
+                    parsed_items.append(CalendarItem.from_dict(raw))
+                if parsed_items:
+                    parsed_map[str(key)] = parsed_items
+
+            self.items_by_day = parsed_map
+            max_seen_id = max(
+                (item.item_id for group in self.items_by_day.values() for item in group),
+                default=0,
+            )
+            self.next_item_id = max(max_seen_id + 1, payload.get("next_item_id", 1))
+            self._save_items()
+            self._refresh_calendar()
+            self._refresh_upcoming_due_notice()
+            self._set_status("Undo: restored previous calendar data.")
+        except Exception:
+            self._set_status("Undo failed.")
+
+    # import/export JSON feature removed
+
+    def _on_enter_pressed(self, event: object) -> None:
+        """Enter: try to add item when editor fields have focus."""
+        focused = self.focus_get()
+        if focused in (self.title_entry, self.time_entry, self.details_text):
+            self._add_item()
+
+    def _on_delete_pressed(self, event: object) -> None:
+        """Delete: remove selected item when item list has focus."""
+        if self.focus_get() == self.item_list:
+            self._remove_item()
+
+    def _select_next_item(self) -> None:
+        """Select the next visible item in the item_list (wraps)."""
+        size = self.item_list.size()
+        if size == 0:
+            return
+        sel = self.item_list.curselection()
+        idx = int(sel[0]) if sel else -1
+        next_idx = (idx + 1) % size
+        try:
+            self.item_list.selection_clear(0, tk.END)
+            self.item_list.selection_set(next_idx)
+            self.item_list.see(next_idx)
+            self._on_item_selected(None)
+        except Exception:
+            pass
+
+    def _select_prev_item(self) -> None:
+        """Select the previous visible item in the item_list (wraps)."""
+        size = self.item_list.size()
+        if size == 0:
+            return
+        sel = self.item_list.curselection()
+        idx = int(sel[0]) if sel else 0
+        prev_idx = (idx - 1) % size
+        try:
+            self.item_list.selection_clear(0, tk.END)
+            self.item_list.selection_set(prev_idx)
+            self.item_list.see(prev_idx)
+            self._on_item_selected(None)
+        except Exception:
+            pass
 
 
 def main() -> None:
