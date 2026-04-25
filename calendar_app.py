@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tkinter as tk
+import subprocess
 from tkinter import ttk
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import webbrowser
@@ -1112,6 +1113,17 @@ class CalendarApp(tk.Tk):
                 "<Button-1>",
                 lambda _event, link=clean_link: self._open_link(link),
             )
+            # Right-click (Windows) or middle-click (macOS) shows a browser choice menu
+            self.details_text.tag_bind(
+                tag_name,
+                "<Button-3>",
+                lambda event, link=clean_link: self._show_link_context_menu(event, link),
+            )
+            self.details_text.tag_bind(
+                tag_name,
+                "<Button-2>",
+                lambda event, link=clean_link: self._show_link_context_menu(event, link),
+            )
             self.details_text.tag_bind(
                 tag_name,
                 "<Enter>",
@@ -1138,6 +1150,114 @@ class CalendarApp(tk.Tk):
             self._set_status(f"Opened {target_link}")
         else:
             self._set_status(f"Could not open {target_link}")
+
+    def _show_link_context_menu(self, event: object, link: str) -> None:
+        """Shows a context menu offering browser choices for opening `link`."""
+        try:
+            menu = tk.Menu(self, tearoff=0)
+            choices = [
+                "System Default",
+                "Microsoft Edge",
+                "Google Chrome",
+                "Firefox",
+                "Brave",
+                "Opera",
+            ]
+
+            for choice in choices:
+                menu.add_command(
+                    label=choice,
+                    command=lambda c=choice, l=link: (
+                        self._open_link_with_browser(l, c)
+                    ),
+                )
+
+            # show menu at pointer
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+        except Exception:
+            # fallback to direct open
+            self._open_link(link)
+
+    def _open_link_with_browser(self, target_link: str, browser_name: str) -> bool:
+        """Attempt to open `target_link` in the named browser. Returns True on success."""
+        if not target_link.lower().startswith(("http://", "https://")):
+            target_link = f"https://{target_link}"
+
+        # System default just delegates to webbrowser
+        if browser_name == "System Default":
+            try:
+                opened = webbrowser.open(target_link, new=2)
+                if opened:
+                    self._set_status(f"Opened {target_link} in system default browser")
+                else:
+                    self._set_status(f"Could not open {target_link} in system default browser")
+                return bool(opened)
+            except Exception:
+                return False
+
+        candidates: Dict[str, List[str]] = {
+            "Google Chrome": [
+                "chrome",
+                "google-chrome",
+                r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+                r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            ],
+            "Microsoft Edge": [
+                "msedge",
+                r"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+                r"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+            ],
+            "Firefox": [
+                "firefox",
+                r"C:\\Program Files\\Mozilla Firefox\\firefox.exe",
+                r"C:\\Program Files (x86)\\Mozilla Firefox\\firefox.exe",
+            ],
+            "Brave": [
+                "brave",
+                r"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            ],
+            "Opera": [
+                "opera",
+                r"C:\\Program Files\\Opera\\launcher.exe",
+            ],
+        }
+
+        probes = candidates.get(browser_name, [])
+
+        for probe in probes:
+            try:
+                exe = shutil.which(probe)
+                if exe:
+                    subprocess.Popen([exe, target_link], shell=False)
+                    self._set_status(f"Opened {target_link} in {browser_name}")
+                    return True
+                # if probe looks like a path
+                if os.path.exists(probe):
+                    subprocess.Popen([probe, target_link], shell=False)
+                    self._set_status(f"Opened {target_link} in {browser_name}")
+                    return True
+            except Exception:
+                continue
+
+        # Last resort: try webbrowser controllers by common names
+        try:
+            for key in ("chrome", "msedge", "firefox", "brave", "opera"):
+                try:
+                    ctrl = webbrowser.get(key)
+                    ctrl.open(target_link, new=2)
+                    self._set_status(f"Opened {target_link} in {browser_name}")
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # All attempts failed
+        self._set_status(f"Could not open {target_link} in {browser_name}")
+        return False
 
     def _import_moodle_dates(self) -> None:
         """Crawls Moodle pages and imports dated class items into the calendar."""
