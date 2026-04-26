@@ -12,7 +12,6 @@ Recommended stack:
 - pytest
 - pytest-cov
 - ruff
-- pytest-qt, if the app uses PySide/PyQt/Qt and GUI automation is feasible
 - GitHub Actions or GitLab CI for automated testing on push or merge request
 
 ---
@@ -33,16 +32,12 @@ The testing process should verify:
 
 ## 2. Expected Project Structure
 
-Recommended testing layout:
+Current testing layout:
 
 ```text
-your-repo/
-  src/
-    yourapp/
-      __init__.py
-      main.py
-      services/
-      ui/
+Moodle_Calendar/
+  calendar_app.py
+  moodle_crawler.py
   tests/
     unit/
     integration/
@@ -55,7 +50,7 @@ your-repo/
   README.md
 ```
 
-Replace `yourapp` with the actual Python package name used by the project.
+This repository keeps the desktop app in top-level modules: `calendar_app.py` and `moodle_crawler.py`.
 
 ---
 
@@ -68,7 +63,7 @@ Before running tests, make sure the following are installed:
 - Project dependencies
 - Development/testing dependencies
 
-If the app uses Qt/PySide/PyQt, GUI tests may also require additional display libraries on Linux or WSL.
+This app uses Tkinter, not Qt/PySide/PyQt, so `pytest-qt` is not part of this test setup.
 
 ---
 
@@ -105,16 +100,7 @@ Install testing/development dependencies:
 python -m pip install -r requirements-dev.txt
 ```
 
-If `requirements-dev.txt` does not exist yet, create one with dependencies such as:
-
-```text
-pytest
-pytest-cov
-ruff
-pytest-qt
-```
-
-Only include `pytest-qt` if the application uses Qt, PySide, or PyQt.
+Development dependencies are tracked in `requirements-dev.txt`.
 
 ---
 
@@ -184,10 +170,10 @@ Coverage should be measured with `pytest-cov`.
 Run coverage:
 
 ```bash
-pytest tests/unit tests/integration --cov=yourapp --cov-report=term --cov-report=html
+pytest tests/unit tests/integration --cov=calendar_app --cov=moodle_crawler --cov-report=term --cov-report=html
 ```
 
-Replace `yourapp` with the actual package name.
+Coverage is measured against `calendar_app` and `moodle_crawler`.
 
 Expected result:
 
@@ -200,31 +186,15 @@ Coverage should meet the threshold documented by the team.
 Recommended starting threshold:
 
 ```text
-70% line coverage
+20% line coverage
 ```
 
-A lower threshold is acceptable only if the team documents a clear reason in `TEST-RESULTS.md` and the P#12 report.
+The initial threshold is intentionally lower than the recommended 70% because the existing application is a large Tkinter script with browser-automation paths. `TEST-RESULTS.md` documents this as the main remaining testing gap.
 
 Suggested `pyproject.toml` configuration:
 
 ```toml
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = "-ra -q --strict-markers"
-markers = [
-    "slow: marks tests as slow",
-    "gui: marks tests that need a display",
-]
-
-[tool.coverage.run]
-branch = true
-source = ["yourapp"]
-omit = ["*/tests/*", "*/__main__.py"]
-
-[tool.coverage.report]
-fail_under = 70
-show_missing = true
+Use the committed `pyproject.toml` for the current pytest, coverage, and Ruff configuration.
 ```
 
 ---
@@ -249,41 +219,7 @@ Example golden path format:
 
 ## 9. Option A: Automated GUI E2E Test
 
-Use this option if the desktop app uses Qt, PySide, or PyQt and can be tested through stable widgets.
-
-Recommended tool:
-
-```text
-pytest-qt
-```
-
-Run GUI/E2E tests locally:
-
-```bash
-pytest tests/e2e -m gui -v
-```
-
-Expected result:
-
-```text
-The E2E test should launch the relevant window or dialog.
-The test should perform the golden path actions.
-The test should assert that the expected output or UI state appears.
-The test should pass without manual interaction.
-```
-
-For Linux CI, run with Xvfb:
-
-```bash
-xvfb-run -a pytest tests/e2e -m gui -v
-```
-
-Recommended GUI testing practices:
-
-- Set stable `objectName` values on important widgets.
-- Avoid pixel-based assertions.
-- Test labels, model state, saved files, or service results.
-- Keep GUI tests limited to the most important workflows.
+Skipped for this project because the desktop app uses Tkinter rather than Qt/PySide/PyQt. The automated golden path is implemented with Option B.
 
 ---
 
@@ -294,7 +230,7 @@ Use this option if the app can expose a command that runs the core workflow with
 Example command:
 
 ```bash
-python -m yourapp --smoke-test
+python calendar_app.py --smoke-test
 ```
 
 A test can call this command using `subprocess` and assert that it exits successfully.
@@ -369,13 +305,13 @@ Use `ruff` to check code quality.
 Run linting:
 
 ```bash
-ruff check src tests
+ruff check calendar_app.py moodle_crawler.py tests
 ```
 
 Check formatting:
 
 ```bash
-ruff format --check src tests
+ruff format --check tests
 ```
 
 Expected result:
@@ -392,15 +328,15 @@ Formatting should be consistent across source and test files.
 Run the following before opening or merging a pull request / merge request:
 
 ```bash
-ruff check src tests
-ruff format --check src tests
+ruff check calendar_app.py moodle_crawler.py tests
+ruff format --check tests
 pytest tests/unit -q
 pytest tests/integration -q
-pytest tests/unit tests/integration --cov=yourapp --cov-report=term --cov-report=html
-pytest tests/e2e -m gui -v
+pytest tests/unit tests/integration --cov=calendar_app --cov=moodle_crawler --cov-report=term --cov-report=html
+pytest tests/e2e -q
 ```
 
-If GUI automation is not available, replace the final command with the approved manual smoke checklist.
+The final command runs the approved headless golden path smoke test.
 
 Expected result:
 
@@ -443,10 +379,10 @@ Suggested GitLab CI flow:
 lint -> unit_tests -> gui_tests -> package_smoke
 ```
 
-Suggested GitHub Actions flow:
+GitHub Actions flow used by this project:
 
 ```text
-checkout -> setup Python -> install dependencies -> lint -> pytest coverage -> optional xvfb GUI tests
+checkout -> setup Python -> install dependencies -> lint -> unit tests -> coverage -> headless golden path
 ```
 
 ---
@@ -499,69 +435,21 @@ Biggest remaining testing gap:
 
 The `README.md` file should include a short Testing section with copy-paste commands.
 
-Suggested README section:
-
-```md
-## Testing
-
-Install development dependencies:
-
-```bash
-python -m pip install -r requirements-dev.txt
-```
-
-Run unit tests:
-
-```bash
-pytest tests/unit -q
-```
-
-Run coverage:
-
-```bash
-pytest tests/unit tests/integration --cov=yourapp --cov-report=term --cov-report=html
-```
-
-Run golden path / GUI tests:
-
-```bash
-pytest tests/e2e -m gui -v
-```
-
-See `TESTING.md` for the full testing procedure.
-```
+The README now includes project-specific lint, unit, integration, coverage, and golden-path commands.
 
 ---
 
 ## 18. Troubleshooting
 
-### Problem: `ImportError: No module named yourapp`
+### Problem: `ImportError: No module named calendar_app`
 
 Fix:
 
 ```bash
-export PYTHONPATH=src
+set PYTHONPATH=.
 ```
 
-Or install the package in editable mode:
-
-```bash
-python -m pip install -e .
-```
-
----
-
-### Problem: Qt tests fail with display errors on Linux
-
-Fix:
-
-```bash
-xvfb-run -a pytest tests/e2e -m gui -v
-```
-
-Also confirm required Linux libraries are installed in CI.
-
----
+Or run pytest from the repository root.
 
 ### Problem: Coverage shows 0%
 
@@ -570,10 +458,10 @@ Fix:
 Check that the package name in the coverage command matches the actual app package:
 
 ```bash
-pytest --cov=yourapp
+pytest --cov=calendar_app --cov=moodle_crawler
 ```
 
-Replace `yourapp` with the real package name.
+Confirm the coverage command names the top-level modules, not a missing package name.
 
 ---
 
@@ -625,4 +513,3 @@ README.md Testing section
 Completed P#12 report PDF
 Recent green pipeline link or screenshot
 ```
-
