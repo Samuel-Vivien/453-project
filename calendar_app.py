@@ -1504,8 +1504,47 @@ class CalendarApp(tk.Tk):
 
 def main() -> None:
     """Application entry point."""
+    if "--smoke-test" in sys.argv:
+        raise SystemExit(run_smoke_test())
+
     app = CalendarApp()
     app.mainloop()
+
+
+def run_smoke_test() -> int:
+    """Runs the headless golden-path workflow used by automated tests."""
+    crawler = MoodleCrawler()
+    assignment_url = "https://moodle.example.edu/mod/assign/view.php?id=453"
+    assignment_html = """
+    <html>
+      <body>
+        <h1>Golden Path Assignment</h1>
+        <p>Due: Friday, May 1, 2026, 11:59 PM</p>
+      </body>
+    </html>
+    """
+    assignment_index = crawler._build_assignment_index([(assignment_url, assignment_html)])
+    events = crawler._extract_events_from_page(assignment_url, assignment_html, assignment_index)
+    if len(events) != 1:
+        print("Smoke test failed: expected one Moodle event.")
+        return 1
+
+    app = object.__new__(CalendarApp)
+    app.items_by_day = {}
+    app.next_item_id = 1
+    app._save_items = lambda: None
+    added_count, skipped_count, updated_count = app._store_moodle_events(events)
+    if (added_count, skipped_count, updated_count) != (1, 0, 0):
+        print("Smoke test failed: event was not imported into the calendar.")
+        return 1
+
+    stored_items = app.items_by_day.get(events[0].event_date.isoformat(), [])
+    if len(stored_items) != 1 or events[0].source_url not in stored_items[0].details:
+        print("Smoke test failed: imported calendar item did not match expected title/date.")
+        return 1
+
+    print("Smoke test passed: Moodle assignment imported into calendar data.")
+    return 0
 
 
 if __name__ == "__main__":
