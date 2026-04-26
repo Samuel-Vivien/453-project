@@ -12,6 +12,12 @@ build/
 dist/
 release/
 
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+pytest-cache-files-*/
+
 # Local environment/config
 .env
 .env.*

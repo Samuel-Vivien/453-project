@@ -1,0 +1,28 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+markers = [
+    "gui: marks tests that need a desktop display",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["calendar_app", "moodle_crawler"]
+omit = [
+    "tests/*",
+    "build_student_release.py",
+]
+
+[tool.coverage.report]
+fail_under = 20
+show_missing = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "B"]
+ignore = [
+    "E501",
+]

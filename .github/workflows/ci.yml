@@ -1,0 +1,47 @@
+name: Tests
+
+on:
+  push:
+    branches:
+      - main
+      - test_integration
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          ruff check calendar_app.py moodle_crawler.py tests
+          ruff format --check tests
+
+      - name: Unit tests
+        run: pytest tests/unit -q
+
+      - name: Integration tests with coverage
+        run: pytest tests/unit tests/integration --cov=calendar_app --cov=moodle_crawler --cov-report=term --cov-report=html
+
+      - name: Golden path smoke test
+        run: pytest tests/e2e -q
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: htmlcov
+          path: htmlcov

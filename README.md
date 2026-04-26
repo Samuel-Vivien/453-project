@@ -104,6 +104,47 @@ python3 -m pip install -r requirements.txt
 python3 calendar_app.py
 ```
 
+## Testing
+
+Install development dependencies:
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
+Run lint checks:
+
+```bash
+ruff check calendar_app.py moodle_crawler.py tests
+ruff format --check tests
+```
+
+Run unit tests:
+
+```bash
+pytest tests/unit -q
+```
+
+Run integration tests:
+
+```bash
+pytest tests/integration -q
+```
+
+Run coverage:
+
+```bash
+pytest tests/unit tests/integration --cov=calendar_app --cov=moodle_crawler --cov-report=term --cov-report=html
+```
+
+Run the headless golden path smoke test:
+
+```bash
+pytest tests/e2e -q
+```
+
+See `TESTING.md` for the full testing procedure and `TEST-RESULTS.md` for the latest local results.
+
 ## Notes
 
 - Click a day on the month grid to load its items.
