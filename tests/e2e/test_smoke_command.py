@@ -20,3 +20,7 @@ def test_headless_golden_path_smoke_command() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert "Smoke test passed" in completed.stdout
+
+
+if __name__ == "__main__":
+    raise SystemExit(__import__("pytest").main([__file__]))

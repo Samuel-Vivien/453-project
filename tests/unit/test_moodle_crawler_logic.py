@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import sys
 from datetime import date, timedelta
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from moodle_crawler import MoodleCrawler, MoodleEvent
 
@@ -53,3 +59,7 @@ def test_dedupe_events_prefers_assignment_source_over_course_source() -> None:
     deduped = crawler._dedupe_events([generic, specific])
 
     assert deduped == [specific]
+
+
+if __name__ == "__main__":
+    raise SystemExit(__import__("pytest").main([__file__]))

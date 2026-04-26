@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from types import MethodType
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from calendar_app import CalendarApp
 from moodle_crawler import MoodleCrawler
@@ -47,3 +53,7 @@ def test_moodle_assignment_page_imports_into_calendar() -> None:
     assert stored.title == "Homework: [CMPS453] Project Integration Report"
     assert stored.time_label == "11:59 PM"
     assert stored.details.endswith("Source: https://moodle.example.edu/mod/assign/view.php?id=77")
+
+
+if __name__ == "__main__":
+    raise SystemExit(__import__("pytest").main([__file__]))
