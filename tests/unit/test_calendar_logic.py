@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import MethodType
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -18,6 +19,7 @@ def make_headless_app() -> CalendarApp:
     app.items_by_day = {}
     app.next_item_id = 1
     app._save_items = MethodType(lambda self: None, app)
+    app.color_blind_var = SimpleNamespace(get=lambda: False)
     return app
 
 
@@ -28,6 +30,62 @@ def test_calendar_item_from_dict_defaults_missing_optional_fields() -> None:
     assert item.title == "Project checkpoint"
     assert item.details == ""
     assert item.time_label == ""
+
+
+def test_calendar_item_from_dict_restores_due_fields() -> None:
+    item = CalendarItem.from_dict(
+        {
+            "item_id": "8",
+            "title": "Presentation",
+            "due_date": "2026-05-05",
+            "due_time": "11:59 PM",
+            "time_label": "11:59 PM",
+        }
+    )
+
+    assert item.due_date == "2026-05-05"
+    assert item.due_time == "11:59 PM"
+
+
+def test_item_due_datetime_uses_saved_date_and_time() -> None:
+    app = make_headless_app()
+    item = CalendarItem(item_id=1, title="Soon", due_date="2026-05-05", due_time="11:59 PM")
+
+    due_dt = app._item_due_datetime(item, date(2026, 5, 1))
+
+    assert due_dt == datetime(2026, 5, 5, 23, 59)
+
+
+def test_item_urgency_marks_overdue_and_soon_deadlines_red_or_yellow() -> None:
+    app = make_headless_app()
+    now = datetime.now()
+
+    overdue_time = now - timedelta(hours=1)
+    soon_time = now + timedelta(days=2)
+    later_time = now + timedelta(days=5)
+
+    overdue_item = CalendarItem(
+        item_id=2,
+        title="Overdue",
+        due_date=overdue_time.date().isoformat(),
+        due_time=overdue_time.strftime("%I:%M %p"),
+    )
+    soon_item = CalendarItem(
+        item_id=3,
+        title="Soon",
+        due_date=soon_time.date().isoformat(),
+        due_time=soon_time.strftime("%I:%M %p"),
+    )
+    later_item = CalendarItem(
+        item_id=4,
+        title="Later",
+        due_date=later_time.date().isoformat(),
+        due_time=later_time.strftime("%I:%M %p"),
+    )
+
+    assert app._item_urgency(overdue_item, overdue_time.date()) == "danger"
+    assert app._item_urgency(soon_item, soon_time.date()) in {"danger", "warning"}
+    assert app._item_urgency(later_item, later_time.date()) == "success"
 
 
 def test_sanitize_user_message_hides_webdriver_stacktrace() -> None:
