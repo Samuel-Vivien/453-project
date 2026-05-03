@@ -208,6 +208,9 @@ class CalendarApp(tk.Tk):
         self.app_settings: Dict[str, object] = dict(DEFAULT_APP_SETTINGS)
         self.active_view = "calendar"
         self.sidebar_buttons: Dict[str, tk.Button] = {}
+        self.item_view_buttons: Dict[str, tk.Button] = {}
+        self.item_view_mode_var = tk.StringVar(value="day")
+        self.item_list_rows: List[Tuple[date, CalendarItem]] = []
         self.font_family_var = tk.StringVar(value=str(DEFAULT_APP_SETTINGS["font_family_mode"]))
         self.font_size_var = tk.StringVar(value="Medium")
         self.color_blind_var = tk.BooleanVar(value=bool(DEFAULT_APP_SETTINGS["color_blind_mode"]))
@@ -474,12 +477,33 @@ class CalendarApp(tk.Tk):
         self.selected_day_label = ttk.Label(side_panel, text="", font=("Segoe UI", 13, "bold"), style="Panel.TLabel")
         self.selected_day_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
-        summary_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
-        summary_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        summary_frame.columnconfigure(0, weight=1)
-        ttk.Label(summary_frame, text="Upcoming Deadlines", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
-        legend_frame = ttk.Frame(summary_frame, style="Panel.TFrame")
-        legend_frame.grid(row=1, column=0, sticky="w", pady=(0, 6))
+        list_header_frame = ttk.Frame(side_panel, padding=(8, 0, 8, 6), style="Panel.TFrame")
+        list_header_frame.grid(row=1, column=0, sticky="ew", pady=(0, 2))
+        list_header_frame.columnconfigure(0, weight=1)
+        self.item_list_title_label = ttk.Label(list_header_frame, text="Current Day", style="Panel.TLabel")
+        self.item_list_title_label.grid(row=0, column=0, sticky="w", pady=(0, 4))
+        toggle_frame = tk.Frame(
+            list_header_frame,
+            bg=self.theme["panel_alt"],
+            highlightthickness=1,
+            highlightbackground=self.theme["border"],
+        )
+        toggle_frame.grid(row=0, column=1, sticky="e", pady=(0, 4))
+        for col_idx, (mode, label) in enumerate((("day", "Current Day"), ("all", "All Items"))):
+            button = tk.Button(
+                toggle_frame,
+                text=label,
+                borderwidth=0,
+                padx=10,
+                pady=4,
+                cursor="hand2",
+                command=lambda selected_mode=mode: self._set_item_view_mode(selected_mode),
+            )
+            button.grid(row=0, column=col_idx, sticky="nsew", padx=(1 if col_idx else 0, 0), pady=0)
+            self.item_view_buttons[mode] = button
+
+        legend_frame = ttk.Frame(list_header_frame, style="Panel.TFrame")
+        legend_frame.grid(row=1, column=0, columnspan=2, sticky="w")
         self.legend_canvas_red = tk.Canvas(legend_frame, width=12, height=12, highlightthickness=0, bg=self.theme["panel"])
         self.legend_canvas_yellow = tk.Canvas(legend_frame, width=12, height=12, highlightthickness=0, bg=self.theme["panel"])
         self.legend_canvas_green = tk.Canvas(legend_frame, width=12, height=12, highlightthickness=0, bg=self.theme["panel"])
@@ -492,14 +516,8 @@ class CalendarApp(tk.Tk):
         self.legend_label_yellow.grid(row=0, column=3, padx=(0, 10))
         self.legend_canvas_green.grid(row=0, column=4, padx=(0, 4))
         self.legend_label_green.grid(row=0, column=5)
-        self.deadline_list = tk.Listbox(summary_frame, height=7, exportselection=False)
-        self.deadline_list.grid(row=2, column=0, sticky="nsew")
-        summary_scroll = ttk.Scrollbar(summary_frame, orient="vertical", command=self.deadline_list.yview)
-        summary_scroll.grid(row=2, column=1, sticky="ns")
-        self.deadline_list.config(yscrollcommand=summary_scroll.set)
 
         items_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
-        ttk.Label(items_frame, text="Items", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
         items_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
         items_frame.columnconfigure(0, weight=1)
         items_frame.rowconfigure(0, weight=1)
@@ -512,44 +530,42 @@ class CalendarApp(tk.Tk):
         list_scroll.grid(row=0, column=1, sticky="ns")
         self.item_list.config(yscrollcommand=list_scroll.set)
 
-        editor_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
-        ttk.Label(editor_frame, text="View / Edit Item", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-        editor_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
-        editor_frame.columnconfigure(1, weight=1)
+        self.editor_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
+        ttk.Label(self.editor_frame, text="View / Edit Item", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        self.editor_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
+        self.editor_frame.columnconfigure(1, weight=1)
 
-        ttk.Label(editor_frame, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(self.editor_frame, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.title_var = tk.StringVar()
-        self.title_entry = ttk.Entry(editor_frame, textvariable=self.title_var)
+        self.title_entry = ttk.Entry(self.editor_frame, textvariable=self.title_var)
         self.title_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Label(editor_frame, text="Due Date (MM/DD/YYYY)").grid(row=1, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(self.editor_frame, text="Due Date (MM/DD/YYYY)").grid(row=1, column=0, sticky="w", pady=(0, 4))
         self.due_date_var = tk.StringVar()
-        self.due_date_entry = ttk.Entry(editor_frame, textvariable=self.due_date_var)
+        self.due_date_entry = ttk.Entry(self.editor_frame, textvariable=self.due_date_var)
         self.due_date_entry.grid(row=1, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Label(editor_frame, text="Due Time (HH:MM AM/PM)").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(self.editor_frame, text="Due Time (HH:MM AM/PM)").grid(row=2, column=0, sticky="w", pady=(0, 4))
         self.time_var = tk.StringVar()
-        self.time_entry = ttk.Entry(editor_frame, textvariable=self.time_var)
+        self.time_entry = ttk.Entry(self.editor_frame, textvariable=self.time_var)
         self.time_entry.grid(row=2, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Label(editor_frame, text="Details").grid(row=3, column=0, sticky="nw", pady=(0, 4))
-        self.details_text = tk.Text(editor_frame, height=6, wrap="word")
+        ttk.Label(self.editor_frame, text="Details").grid(row=3, column=0, sticky="nw", pady=(0, 4))
+        self.details_text = tk.Text(self.editor_frame, height=6, wrap="word")
         self.details_text.grid(row=3, column=1, sticky="nsew", pady=(0, 4))
         self.details_text.bind("<KeyRelease>", self._on_details_changed)
-        editor_frame.rowconfigure(3, weight=1)
+        self.editor_frame.rowconfigure(3, weight=1)
 
-        action_frame = ttk.Frame(editor_frame, style="Panel.TFrame")
+        action_frame = ttk.Frame(self.editor_frame, style="Panel.TFrame")
         action_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        action_frame.columnconfigure(tuple(range(4)), weight=1)
+        action_frame.columnconfigure(tuple(range(3)), weight=1)
 
         self.add_button = ttk.Button(action_frame, text="Add", command=self._add_item)
         self.add_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
         self.update_button = ttk.Button(action_frame, text="Update", command=self._update_item)
         self.update_button.grid(row=0, column=1, sticky="ew", padx=3)
         self.delete_button = ttk.Button(action_frame, text="Remove", command=self._remove_item)
-        self.delete_button.grid(row=0, column=2, sticky="ew", padx=3)
-        self.clear_button = ttk.Button(action_frame, text="Clear", command=self._clear_editor)
-        self.clear_button.grid(row=0, column=3, sticky="ew", padx=(3, 0))
+        self.delete_button.grid(row=0, column=2, sticky="ew", padx=(3, 0))
 
         moodle_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
         ttk.Label(moodle_frame, text="Moodle Import", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
@@ -598,6 +614,7 @@ class CalendarApp(tk.Tk):
 
         self._button_dates: Dict[int, Optional[date]] = {idx: None for idx in range(42)}
         self._set_active_view("calendar")
+        self.bind_all("<Button-1>", self._on_global_click_for_deselect, add="+")
 
     def _go_previous_month(self) -> None:
         """Navigates the calendar to the previous month."""
@@ -848,6 +865,7 @@ class CalendarApp(tk.Tk):
             ):
                 canvas.create_oval(2, 2, 10, 10, fill=color, outline=color)
 
+        self._refresh_item_view_toggle()
         self._refresh_sidebar_state()
         self._refresh_view_content()
 
@@ -1194,14 +1212,61 @@ class CalendarApp(tk.Tk):
         self.selected_day_label.config(text=f"Selected Day: {self.selected_date.strftime('%A, %b %d, %Y')}")
 
     def _refresh_item_list(self) -> None:
-        """Rebuilds the listbox with all items for the selected day."""
+        """Rebuilds the visible item list for the current day or the full calendar."""
         self.item_list.delete(0, tk.END)
-        day_items = self.items_by_day.get(self._date_key(self.selected_date), [])
-        for idx, item in enumerate(day_items):
-            _, _, color = self._urgency_metadata(item, self.selected_date)
-            self.item_list.insert(tk.END, self._format_item_display(item, self.selected_date))
+        self.item_list_rows = []
+
+        if self.item_view_mode_var.get() == "all":
+            rows = self._iter_sorted_items()
+            self.item_list_title_label.config(text="All Items")
+            empty_message = "No calendar items yet."
+        else:
+            day_items = self.items_by_day.get(self._date_key(self.selected_date), [])
+            rows = [(self.selected_date, item) for item in day_items]
+            self.item_list_title_label.config(text="Current Day")
+            empty_message = "No items for this day."
+
+        if not rows:
+            self.item_list.insert(tk.END, empty_message)
+            self.item_list.itemconfig(0, foreground=self.theme["muted"])
+            self._clear_editor(keep_status=True)
+            return
+
+        self.item_list_rows = rows
+        for idx, (day_value, item) in enumerate(rows):
+            _, _, color = self._urgency_metadata(item, day_value)
+            self.item_list.insert(tk.END, self._format_item_display(item, day_value))
             self.item_list.itemconfig(idx, foreground=color)
         self._clear_editor(keep_status=True)
+
+    def _set_item_view_mode(self, mode: str) -> None:
+        """Sets the right-side list mode from the themed segmented control."""
+        self.item_view_mode_var.set(mode)
+        self._on_item_view_mode_changed()
+
+    def _on_item_view_mode_changed(self) -> None:
+        """Switches the right-side item list between selected-day and all-item views."""
+        self._refresh_item_view_toggle()
+        self._refresh_item_list()
+
+    def _refresh_item_view_toggle(self) -> None:
+        """Applies active/inactive theme colors to the item list segmented control."""
+        if not hasattr(self, "item_view_buttons"):
+            return
+
+        active_mode = self.item_view_mode_var.get()
+        for mode, button in self.item_view_buttons.items():
+            is_active = mode == active_mode
+            button.configure(
+                bg=self.theme["accent"] if is_active else self.theme["panel_alt"],
+                fg=self.theme["accent_text"] if is_active else self.theme["text"],
+                activebackground=self.theme["accent"] if is_active else self.theme["panel"],
+                activeforeground=self.theme["accent_text"] if is_active else self.theme["text"],
+                font=("Segoe UI", 9, "bold" if is_active else "normal"),
+                highlightthickness=0,
+                relief="flat",
+            )
+            button.master.configure(bg=self.theme["border"], highlightbackground=self.theme["border"])
 
     def _day_urgency(self, day_items: List[CalendarItem], day_value: date) -> str:
         """Returns the most urgent color key for a day based on all items due on that day."""
@@ -1322,6 +1387,9 @@ class CalendarApp(tk.Tk):
         self.progress_var.set(progress_pct)
         self.progress_text_label.config(text=f"{int(round(progress_pct))}%")
 
+        if not hasattr(self, "deadline_list"):
+            return
+
         self.deadline_list.delete(0, tk.END)
         overdue_items = [entry for entry in all_items if entry[0] < today][-5:]
         upcoming_items = [entry for entry in all_items if entry[0] >= today][: max(0, 12 - len(overdue_items))]
@@ -1339,16 +1407,51 @@ class CalendarApp(tk.Tk):
 
     def _on_item_selected(self, _event: object) -> None:
         """Loads the selected item into the inline editor fields."""
-        selected_item = self._get_selected_item()
-        if selected_item is None:
+        selected_context = self._get_selected_item_context()
+        if selected_context is None:
             return
+        selected_day, selected_item = selected_context
         self.title_var.set(selected_item.title)
-        self.due_date_var.set((selected_item.due_date or self.selected_date.isoformat()).strip())
+        self.due_date_var.set((selected_item.due_date or selected_day.isoformat()).strip())
         self.time_var.set((selected_item.due_time or selected_item.time_label or "11:59 PM").strip())
         self.details_text.delete("1.0", tk.END)
         self.details_text.insert("1.0", selected_item.details)
         self._refresh_details_links()
         self._set_status(f"Loaded item #{selected_item.item_id} into editor")
+
+    def _on_global_click_for_deselect(self, event: tk.Event) -> None:
+        """Clears the selected item when the user clicks outside selection/editing controls."""
+        clicked_widget = event.widget
+
+        if clicked_widget is self.item_list:
+            clicked_index = self.item_list.nearest(event.y)
+            clicked_bounds = self.item_list.bbox(clicked_index)
+            clicked_row = (
+                clicked_bounds is not None
+                and clicked_bounds[1] <= event.y <= clicked_bounds[1] + clicked_bounds[3]
+                and 0 <= clicked_index < len(self.item_list_rows)
+            )
+            if not clicked_row:
+                self.after_idle(self._clear_editor)
+            return
+
+        if self._is_descendant(clicked_widget, self.editor_frame):
+            return
+
+        if self.item_list.curselection():
+            self._clear_editor()
+
+    def _is_descendant(self, widget: tk.Widget, ancestor: tk.Widget) -> bool:
+        """Returns whether widget is inside ancestor in the Tk widget tree."""
+        current: Optional[tk.Widget] = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            parent_name = current.winfo_parent()
+            if not parent_name:
+                return False
+            current = current.nametowidget(parent_name)
+        return False
 
     def _add_item(self) -> None:
         """Creates a new item for the selected day and persists it."""
@@ -1392,10 +1495,11 @@ class CalendarApp(tk.Tk):
 
     def _update_item(self) -> None:
         """Applies editor changes to the currently selected item."""
-        selected_index = self._selected_index()
-        if selected_index is None:
+        selected_context = self._get_selected_item_context()
+        if selected_context is None:
             self._set_status("Choose an item from the list before updating.")
             return
+        selected_day, selected_item = selected_context
 
         title = self.title_var.get().strip()
         if not title:
@@ -1418,9 +1522,10 @@ class CalendarApp(tk.Tk):
             self._show_error(message, "Invalid Due Time")
             return
 
-        key = self._date_key(self.selected_date)
+        key = self._date_key(selected_day)
         items = self.items_by_day.get(key, [])
-        if not (0 <= selected_index < len(items)):
+        selected_index = next((idx for idx, item in enumerate(items) if item.item_id == selected_item.item_id), None)
+        if selected_index is None:
             self._set_status("Selected item is no longer available.")
             return
 
@@ -1442,19 +1547,20 @@ class CalendarApp(tk.Tk):
         self._save_items()
         self._refresh_calendar()
         self._refresh_upcoming_due_notice()
-        self.item_list.selection_set(selected_index)
         self._set_status(f"Updated item for {key}")
 
     def _remove_item(self) -> None:
         """Deletes the selected item from the selected day."""
-        selected_index = self._selected_index()
-        if selected_index is None:
+        selected_context = self._get_selected_item_context()
+        if selected_context is None:
             self._set_status("Choose an item from the list before removing.")
             return
+        selected_day, selected_item = selected_context
 
-        key = self._date_key(self.selected_date)
+        key = self._date_key(selected_day)
         items = self.items_by_day.get(key, [])
-        if not (0 <= selected_index < len(items)):
+        selected_index = next((idx for idx, item in enumerate(items) if item.item_id == selected_item.item_id), None)
+        if selected_index is None:
             self._set_status("Selected item is no longer available.")
             return
 
@@ -2021,13 +2127,19 @@ class CalendarApp(tk.Tk):
 
     def _get_selected_item(self) -> Optional[CalendarItem]:
         """Returns the selected CalendarItem for the active day."""
+        selected_context = self._get_selected_item_context()
+        if selected_context is None:
+            return None
+        return selected_context[1]
+
+    def _get_selected_item_context(self) -> Optional[Tuple[date, CalendarItem]]:
+        """Returns the selected row's source day and item."""
         selected_index = self._selected_index()
         if selected_index is None:
             return None
-        day_items = self.items_by_day.get(self._date_key(self.selected_date), [])
-        if not (0 <= selected_index < len(day_items)):
+        if not (0 <= selected_index < len(self.item_list_rows)):
             return None
-        return day_items[selected_index]
+        return self.item_list_rows[selected_index]
 
     def _set_status(self, message: str) -> None:
         """Writes a short message into the in-window status bar."""
