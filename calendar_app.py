@@ -7,7 +7,7 @@ removing multiple calendar items per day without opening extra windows.
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 import calendar
 import json
 import os
@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import webbrowser
@@ -99,14 +100,31 @@ def _resolve_data_file() -> Path:
 
 DATA_FILE = _resolve_data_file()
 
+DEFAULT_APP_SETTINGS = {
+    "font_family_mode": "standard",
+    "font_size": "medium",
+    "color_blind_mode": False,
+}
+
 LIGHT_THEME = {
     "bg": "#f4f6fb",
     "panel": "#ffffff",
     "panel_alt": "#eef2f7",
+    "sidebar": "#23364a",
+    "sidebar_text": "#f3f4f6",
+    "sidebar_muted": "#b8c2cf",
+    "sidebar_active": "#33526f",
     "text": "#1f1f1f",
     "muted": "#5f6b7a",
     "accent": "#2563eb",
     "accent_text": "#ffffff",
+    "danger": "#dc2626",
+    "warning": "#d97706",
+    "success": "#16a34a",
+    "day_danger_bg": "#fee2e2",
+    "day_warning_bg": "#fef3c7",
+    "day_success_bg": "#dcfce7",
+    "day_text": "#111827",
     "border": "#cbd5e1",
     "input_bg": "#ffffff",
     "input_fg": "#1f1f1f",
@@ -120,10 +138,21 @@ DARK_THEME = {
     "bg": "#000000",       
     "panel": "#0d0d0d",       
     "panel_alt": "#1a1a1a",   
+    "sidebar": "#121a24",
+    "sidebar_text": "#f8fafc",
+    "sidebar_muted": "#9aa4b2",
+    "sidebar_active": "#1c2a3a",
     "text": "#ffffff",      
     "muted": "#aaaaaa",      
     "accent": "#0a84ff",      
     "accent_text": "#ffffff",
+    "danger": "#ef4444",
+    "warning": "#f59e0b",
+    "success": "#22c55e",
+    "day_danger_bg": "#2b1114",
+    "day_warning_bg": "#2c220c",
+    "day_success_bg": "#102317",
+    "day_text": "#ffffff",
     "border": "#333333",
     "input_bg": "#0a0a0a",
     "input_fg": "#ffffff",
@@ -140,6 +169,8 @@ class CalendarItem:
 
     item_id: int
     title: str
+    due_date: str = ""
+    due_time: str = ""
     details: str = ""
     time_label: str = ""
 
@@ -149,6 +180,8 @@ class CalendarItem:
         return cls(
             item_id=int(data["item_id"]),
             title=str(data["title"]),
+            due_date=str(data.get("due_date", "")),
+            due_time=str(data.get("due_time", data.get("time_label", ""))),
             details=str(data.get("details", "")),
             time_label=str(data.get("time_label", "")),
         )
@@ -172,6 +205,12 @@ class CalendarApp(tk.Tk):
         self.selected_date = today
         self.next_item_id = 1
         self.items_by_day: Dict[str, List[CalendarItem]] = {}
+        self.app_settings: Dict[str, object] = dict(DEFAULT_APP_SETTINGS)
+        self.active_view = "calendar"
+        self.sidebar_buttons: Dict[str, tk.Button] = {}
+        self.font_family_var = tk.StringVar(value=str(DEFAULT_APP_SETTINGS["font_family_mode"]))
+        self.font_size_var = tk.StringVar(value="Medium")
+        self.color_blind_var = tk.BooleanVar(value=bool(DEFAULT_APP_SETTINGS["color_blind_mode"]))
         # Higher page limit improves assignment metadata coverage for accurate class/date mapping.
         self.moodle_crawler = MoodleCrawler(max_pages=60)
         self._url_tag_to_link: Dict[str, str] = {}
@@ -192,6 +231,7 @@ class CalendarApp(tk.Tk):
         self._build_layout()
         self._apply_theme()
         self._load_items()
+        self._apply_accessibility_preferences()
         removed_count = self._dedupe_existing_import_items()
         if removed_count:
             self._save_items()
@@ -201,18 +241,75 @@ class CalendarApp(tk.Tk):
 
     def _build_layout(self) -> None:
         """Creates and arranges all widgets in the single main window."""
-        self.columnconfigure(0, weight=3)
-        self.columnconfigure(1, weight=2)
+        self.columnconfigure(0, weight=0)
+        self.columnconfigure(1, weight=5)
+        self.columnconfigure(2, weight=4)
         self.rowconfigure(0, weight=1)
 
+        sidebar = tk.Frame(self, bg=self.theme["sidebar"], width=210)
+        sidebar.grid(row=0, column=0, sticky="ns")
+        sidebar.grid_propagate(False)
+        sidebar.columnconfigure(0, weight=1)
+
+        self.sidebar_title_label = tk.Label(
+            sidebar,
+            text="📚 Student Dashboard",
+            font=("Segoe UI", 13, "bold"),
+            bg=self.theme["sidebar"],
+            fg=self.theme["sidebar_text"],
+            anchor="w",
+        )
+        self.sidebar_title_label.grid(row=0, column=0, sticky="ew", padx=14, pady=(16, 12))
+
+        for row_idx, (view_name, label) in enumerate(
+            [
+                ("calendar", "📅 Calendar"),
+                ("assignments", "🗂️ Assignments"),
+                ("due", "⏰ Due Soon"),
+                ("settings", "⚙️ Settings"),
+            ],
+            start=1,
+        ):
+            nav_btn = tk.Button(
+                sidebar,
+                text=" ".join(str(label).split()),
+                font=("Segoe UI", 11),
+                bg=self.theme["sidebar"],
+                fg=self.theme["sidebar_text"],
+                activebackground=self.theme["sidebar_active"],
+                activeforeground=self.theme["sidebar_text"],
+                relief="flat",
+                bd=0,
+                anchor="w",
+                padx=16,
+                pady=12,
+                command=lambda name=view_name: self._set_active_view(name),
+            )
+            nav_btn.grid(row=row_idx, column=0, sticky="ew", padx=10, pady=4)
+            nav_btn.bind("<Enter>", lambda _event, button=nav_btn: self._on_sidebar_hover(button, True))
+            nav_btn.bind("<Leave>", lambda _event, button=nav_btn: self._on_sidebar_hover(button, False))
+            self.sidebar_buttons[view_name] = nav_btn
+
         calendar_panel = ttk.Frame(self, padding=14, style="Panel.TFrame")
-        calendar_panel.grid(row=0, column=0, sticky="nsew")
+        calendar_panel.grid(row=0, column=1, sticky="nsew")
         calendar_panel.columnconfigure(0, weight=1)
-        calendar_panel.rowconfigure(2, weight=1)
+        calendar_panel.rowconfigure(3, weight=1)
+
+        self.view_title_label = ttk.Label(
+            calendar_panel,
+            text="Calendar",
+            font=("Segoe UI", 15, "bold"),
+            style="Panel.TLabel",
+        )
+        self.view_title_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
         nav_frame = ttk.Frame(calendar_panel, style="Panel.TFrame")
-        nav_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.nav_frame = nav_frame
+        nav_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        nav_frame.columnconfigure(0, weight=0)
         nav_frame.columnconfigure(1, weight=1)
+        nav_frame.columnconfigure(2, weight=0)
+        nav_frame.columnconfigure(3, weight=0)
 
         self.prev_btn = ttk.Button(nav_frame, text="<", width=4, command=self._go_previous_month)
         self.prev_btn.grid(row=0, column=0, sticky="w")
@@ -223,11 +320,11 @@ class CalendarApp(tk.Tk):
         self.next_btn = ttk.Button(nav_frame, text=">", width=4, command=self._go_next_month)
         self.next_btn.grid(row=0, column=2, sticky="e")
 
-        self.theme_button = ttk.Button(nav_frame, text="Light Mode", command=self._toggle_theme)
-        self.theme_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.nav_spacer = ttk.Label(nav_frame, text="", style="Panel.TLabel")
+        self.nav_spacer.grid(row=0, column=3, sticky="e", padx=(8, 0))
 
         weekdays = ttk.Frame(calendar_panel, style="Panel.TFrame")
-        weekdays.grid(row=1, column=0, sticky="ew")
+        weekdays.grid(row=2, column=0, sticky="ew")
         weekdays.columnconfigure(tuple(range(7)), weight=1)
         for idx, weekday in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]):
             ttk.Label(weekdays, text=weekday, anchor="center", style="Muted.TLabel").grid(
@@ -235,7 +332,7 @@ class CalendarApp(tk.Tk):
             )
 
         self.calendar_grid = ttk.Frame(calendar_panel, style="Panel.TFrame")
-        self.calendar_grid.grid(row=2, column=0, sticky="nsew")
+        self.calendar_grid.grid(row=3, column=0, sticky="nsew")
         for row in range(6):
             self.calendar_grid.rowconfigure(row, weight=1)
         for col in range(7):
@@ -253,17 +350,157 @@ class CalendarApp(tk.Tk):
             btn.grid(row=row, column=col, sticky="nsew", padx=2, pady=2, ipadx=2, ipady=10)
             self.day_buttons.append(btn)
 
+        self.assignments_view = ttk.Frame(calendar_panel, style="Panel.TFrame")
+        self.assignments_view.grid(row=2, column=0, sticky="nsew")
+        self.assignments_view.columnconfigure(0, weight=1)
+        self.assignments_view.rowconfigure(1, weight=1)
+        ttk.Label(self.assignments_view, text="All Assignments", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        self.assignments_list = tk.Listbox(self.assignments_view, exportselection=False, height=14)
+        self.assignments_list.grid(row=1, column=0, sticky="nsew")
+        assignments_scroll = ttk.Scrollbar(self.assignments_view, orient="vertical", command=self.assignments_list.yview)
+        assignments_scroll.grid(row=1, column=1, sticky="ns")
+        self.assignments_list.config(yscrollcommand=assignments_scroll.set)
+
+        self.due_view = ttk.Frame(calendar_panel, style="Panel.TFrame")
+        self.due_view.grid(row=2, column=0, sticky="nsew")
+        self.due_view.columnconfigure(0, weight=1)
+        self.due_view.rowconfigure(1, weight=1)
+        ttk.Label(self.due_view, text="Urgent Deadlines", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        self.due_list = tk.Listbox(self.due_view, exportselection=False, height=14)
+        self.due_list.grid(row=1, column=0, sticky="nsew")
+        due_scroll = ttk.Scrollbar(self.due_view, orient="vertical", command=self.due_list.yview)
+        due_scroll.grid(row=1, column=1, sticky="ns")
+        self.due_list.config(yscrollcommand=due_scroll.set)
+
+        self.settings_view = ttk.Frame(calendar_panel, style="Panel.TFrame")
+        self.settings_view.grid(row=2, column=0, sticky="nsew")
+        self.settings_view.columnconfigure(0, weight=1)
+        ttk.Label(self.settings_view, text="Settings", style="Panel.TLabel", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w", pady=(0, 8)
+        )
+        # Theme toggle retained below in settings controls to avoid duplicate controls
+        ttk.Label(
+            self.settings_view,
+            text="Use the sidebar to switch between the calendar, assignment list, and urgent deadlines.",
+            wraplength=520,
+            style="Muted.TLabel",
+        ).grid(row=2, column=0, sticky="w")
+
+        settings_controls = ttk.Frame(self.settings_view, style="Panel.TFrame")
+        settings_controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        settings_controls.columnconfigure(1, weight=1)
+
+        ttk.Label(settings_controls, text="Dyslexic-friendly font", style="Panel.TLabel").grid(row=0, column=0, sticky="w", pady=4)
+        self.dyslexic_font_toggle = ttk.Checkbutton(
+            settings_controls,
+            text="Dyslexic-friendly font",
+            variable=self.font_family_var,
+            onvalue="dyslexic",
+            offvalue="standard",
+            command=self._on_accessibility_settings_changed,
+        )
+        self.dyslexic_font_toggle.grid(row=0, column=1, sticky="w", pady=4)
+
+        ttk.Label(settings_controls, text="Font size", style="Panel.TLabel").grid(row=1, column=0, sticky="w", pady=4)
+        self.font_size_combo = ttk.Combobox(
+            settings_controls,
+            textvariable=self.font_size_var,
+            values=["Small", "Medium", "Large"],
+            state="readonly",
+            width=12,
+        )
+        self.font_size_combo.grid(row=1, column=1, sticky="w", pady=4)
+        self.font_size_combo.bind("<<ComboboxSelected>>", lambda _event: self._on_accessibility_settings_changed())
+
+        self.color_blind_toggle = ttk.Checkbutton(
+            settings_controls,
+            text="Color-blind friendly mode",
+            variable=self.color_blind_var,
+            command=self._on_accessibility_settings_changed,
+        )
+        self.color_blind_toggle.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 4))
+
+        ttk.Button(settings_controls, text="Reset Font/Color Settings", command=self._reset_accessibility_settings).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+
+        ttk.Button(settings_controls, text="Toggle Light / Dark Theme", command=self._toggle_theme).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(10, 0)
+        )
+
+        metrics_frame = ttk.Frame(calendar_panel, style="Panel.TFrame")
+        self.metrics_frame = metrics_frame
+        self._refresh_day_button_fonts()
+        metrics_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        for metric_col in range(3):
+            metrics_frame.columnconfigure(metric_col, weight=1)
+
+        self.metric_total_label = ttk.Label(metrics_frame, text="0", font=("Segoe UI", 16, "bold"), style="MetricValue.TLabel")
+        self.metric_due_today_label = ttk.Label(metrics_frame, text="0", font=("Segoe UI", 16, "bold"), style="MetricDanger.TLabel")
+        self.metric_completed_label = ttk.Label(metrics_frame, text="0", font=("Segoe UI", 16, "bold"), style="MetricSuccess.TLabel")
+
+        metric_cards = [
+            ("Total Assignments", self.metric_total_label),
+            ("Due Today", self.metric_due_today_label),
+            ("Completed", self.metric_completed_label),
+        ]
+        for idx, (title, value_label) in enumerate(metric_cards):
+            card = ttk.Frame(metrics_frame, padding=(10, 8), style="Panel.TFrame")
+            card.grid(row=0, column=idx, sticky="ew", padx=3)
+            ttk.Label(card, text=title, style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+            value_label.grid(in_=card, row=1, column=0, sticky="w", pady=(2, 0))
+
+        self.progress_var = tk.DoubleVar(value=0)
+        progress_row = ttk.Frame(calendar_panel, style="Panel.TFrame")
+        self.progress_row = progress_row
+        progress_row.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        progress_row.columnconfigure(1, weight=1)
+        ttk.Label(progress_row, text="Progress", style="Muted.TLabel").grid(row=0, column=0, sticky="w", padx=(2, 8))
+        self.progress_bar = ttk.Progressbar(progress_row, mode="determinate", maximum=100, variable=self.progress_var)
+        self.progress_bar.grid(row=0, column=1, sticky="ew")
+        self.progress_text_label = ttk.Label(progress_row, text="0%", style="Muted.TLabel")
+        self.progress_text_label.grid(row=0, column=2, sticky="e", padx=(8, 0))
+
         side_panel = ttk.Frame(self, padding=14, style="Panel.TFrame")
-        side_panel.grid(row=0, column=1, sticky="nsew")
+        side_panel.grid(row=0, column=2, sticky="nsew")
         side_panel.columnconfigure(0, weight=1)
-        side_panel.rowconfigure(1, weight=1)
+        side_panel.rowconfigure(2, weight=1)
+        side_panel.rowconfigure(4, weight=1)
 
         self.selected_day_label = ttk.Label(side_panel, text="", font=("Segoe UI", 13, "bold"), style="Panel.TLabel")
         self.selected_day_label.grid(row=0, column=0, sticky="w", pady=(0, 6))
 
+        summary_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
+        summary_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        summary_frame.columnconfigure(0, weight=1)
+        ttk.Label(summary_frame, text="Upcoming Deadlines", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
+        legend_frame = ttk.Frame(summary_frame, style="Panel.TFrame")
+        legend_frame.grid(row=1, column=0, sticky="w", pady=(0, 6))
+        self.legend_canvas_red = tk.Canvas(legend_frame, width=12, height=12, highlightthickness=0, bg=self.theme["panel"])
+        self.legend_canvas_yellow = tk.Canvas(legend_frame, width=12, height=12, highlightthickness=0, bg=self.theme["panel"])
+        self.legend_canvas_green = tk.Canvas(legend_frame, width=12, height=12, highlightthickness=0, bg=self.theme["panel"])
+        self.legend_label_red = ttk.Label(legend_frame, text="Overdue / <=24h", style="Muted.TLabel")
+        self.legend_label_yellow = ttk.Label(legend_frame, text="<=3 days", style="Muted.TLabel")
+        self.legend_label_green = ttk.Label(legend_frame, text="Later", style="Muted.TLabel")
+        self.legend_canvas_red.grid(row=0, column=0, padx=(0, 4))
+        self.legend_label_red.grid(row=0, column=1, padx=(0, 10))
+        self.legend_canvas_yellow.grid(row=0, column=2, padx=(0, 4))
+        self.legend_label_yellow.grid(row=0, column=3, padx=(0, 10))
+        self.legend_canvas_green.grid(row=0, column=4, padx=(0, 4))
+        self.legend_label_green.grid(row=0, column=5)
+        self.deadline_list = tk.Listbox(summary_frame, height=7, exportselection=False)
+        self.deadline_list.grid(row=2, column=0, sticky="nsew")
+        summary_scroll = ttk.Scrollbar(summary_frame, orient="vertical", command=self.deadline_list.yview)
+        summary_scroll.grid(row=2, column=1, sticky="ns")
+        self.deadline_list.config(yscrollcommand=summary_scroll.set)
+
         items_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
         ttk.Label(items_frame, text="Items", style="Panel.TLabel").grid(row=0, column=0, sticky="w")
-        items_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+        items_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
         items_frame.columnconfigure(0, weight=1)
         items_frame.rowconfigure(0, weight=1)
 
@@ -277,7 +514,7 @@ class CalendarApp(tk.Tk):
 
         editor_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
         ttk.Label(editor_frame, text="View / Edit Item", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-        editor_frame.grid(row=2, column=0, sticky="nsew")
+        editor_frame.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
         editor_frame.columnconfigure(1, weight=1)
 
         ttk.Label(editor_frame, text="Title").grid(row=0, column=0, sticky="w", pady=(0, 4))
@@ -285,19 +522,24 @@ class CalendarApp(tk.Tk):
         self.title_entry = ttk.Entry(editor_frame, textvariable=self.title_var)
         self.title_entry.grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Label(editor_frame, text="Time").grid(row=1, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(editor_frame, text="Due Date (MM/DD/YYYY)").grid(row=1, column=0, sticky="w", pady=(0, 4))
+        self.due_date_var = tk.StringVar()
+        self.due_date_entry = ttk.Entry(editor_frame, textvariable=self.due_date_var)
+        self.due_date_entry.grid(row=1, column=1, sticky="ew", pady=(0, 4))
+
+        ttk.Label(editor_frame, text="Due Time (HH:MM AM/PM)").grid(row=2, column=0, sticky="w", pady=(0, 4))
         self.time_var = tk.StringVar()
         self.time_entry = ttk.Entry(editor_frame, textvariable=self.time_var)
-        self.time_entry.grid(row=1, column=1, sticky="ew", pady=(0, 4))
+        self.time_entry.grid(row=2, column=1, sticky="ew", pady=(0, 4))
 
-        ttk.Label(editor_frame, text="Details").grid(row=2, column=0, sticky="nw", pady=(0, 4))
+        ttk.Label(editor_frame, text="Details").grid(row=3, column=0, sticky="nw", pady=(0, 4))
         self.details_text = tk.Text(editor_frame, height=6, wrap="word")
-        self.details_text.grid(row=2, column=1, sticky="nsew", pady=(0, 4))
+        self.details_text.grid(row=3, column=1, sticky="nsew", pady=(0, 4))
         self.details_text.bind("<KeyRelease>", self._on_details_changed)
-        editor_frame.rowconfigure(2, weight=1)
+        editor_frame.rowconfigure(3, weight=1)
 
         action_frame = ttk.Frame(editor_frame, style="Panel.TFrame")
-        action_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        action_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         action_frame.columnconfigure(tuple(range(4)), weight=1)
 
         self.add_button = ttk.Button(action_frame, text="Add", command=self._add_item)
@@ -311,7 +553,7 @@ class CalendarApp(tk.Tk):
 
         moodle_frame = ttk.Frame(side_panel, padding=8, style="Panel.TFrame")
         ttk.Label(moodle_frame, text="Moodle Import", style="Panel.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-        moodle_frame.grid(row=3, column=0, sticky="ew")
+        moodle_frame.grid(row=4, column=0, sticky="nsew")
         moodle_frame.columnconfigure(1, weight=1)
 
         ttk.Label(moodle_frame, text="Moodle Dashboard Url").grid(row=0, column=0, sticky="w", pady=(0, 4))
@@ -352,9 +594,10 @@ class CalendarApp(tk.Tk):
 
         self.status_var = tk.StringVar(value="Ready")
         self.status_label = tk.Label(self, textvariable=self.status_var, anchor="w", padx=8, pady=6)
-        self.status_label.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.status_label.grid(row=1, column=0, columnspan=3, sticky="ew")
 
         self._button_dates: Dict[int, Optional[date]] = {idx: None for idx in range(42)}
+        self._set_active_view("calendar")
 
     def _go_previous_month(self) -> None:
         """Navigates the calendar to the previous month."""
@@ -385,6 +628,7 @@ class CalendarApp(tk.Tk):
 
         self._apply_theme()
         self._refresh_details_links()
+        self._refresh_calendar()
 
     def _apply_theme(self) -> None:
         """Applies the current theme colors to the app and popup windows."""
@@ -396,7 +640,14 @@ class CalendarApp(tk.Tk):
         self.style.configure("TLabel", background=t["bg"], foreground=t["text"])
         self.style.configure("Panel.TFrame", background=t["panel"])
         self.style.configure("Panel.TLabel", background=t["panel"], foreground=t["text"])
+        self.style.configure("Sidebar.TFrame", background=t["sidebar"])
+        self.style.configure("SidebarTitle.TLabel", background=t["sidebar"], foreground=t["sidebar_text"])
+        self.style.configure("SidebarNav.TLabel", background=t["sidebar"], foreground=t["sidebar_muted"])
         self.style.configure("Muted.TLabel", background=t["bg"], foreground=t["muted"])
+        self.style.configure("MetricValue.TLabel", background=t["panel"], foreground=t["accent"])
+        self.style.configure("MetricDanger.TLabel", background=t["panel"], foreground=t["danger"])
+        self.style.configure("MetricSuccess.TLabel", background=t["panel"], foreground=t["success"])
+        self.style.configure("TProgressbar", troughcolor=t["panel_alt"], background=t["accent"], bordercolor=t["border"])
 
         self.style.configure(
             "TLabelFrame",
@@ -460,6 +711,71 @@ class CalendarApp(tk.Tk):
         )
 
         self.style.configure(
+            "LightDangerDay.TButton",
+            background=t["day_danger_bg"],
+            foreground=t["day_text"],
+            bordercolor=t["danger"],
+            padding=10,
+        )
+        self.style.configure(
+            "LightWarningDay.TButton",
+            background=t["day_warning_bg"],
+            foreground=t["day_text"],
+            bordercolor=t["warning"],
+            padding=10,
+        )
+        self.style.configure(
+            "LightSuccessDay.TButton",
+            background=t["day_success_bg"],
+            foreground=t["day_text"],
+            bordercolor=t["success"],
+            padding=10,
+        )
+        self.style.configure(
+            "DarkDangerDay.TButton",
+            background=t["day_danger_bg"],
+            foreground=t["text"],
+            bordercolor=t["danger"],
+            padding=10,
+        )
+        self.style.configure(
+            "DarkWarningDay.TButton",
+            background=t["day_warning_bg"],
+            foreground=t["text"],
+            bordercolor=t["warning"],
+            padding=10,
+        )
+        self.style.configure(
+            "DarkSuccessDay.TButton",
+            background=t["day_success_bg"],
+            foreground=t["text"],
+            bordercolor=t["success"],
+            padding=10,
+        )
+
+        self.style.configure(
+            "DangerDay.TButton",
+            background=t["panel"],
+            foreground=t["danger"],
+            bordercolor=t["border"],
+            padding=10,
+        )
+        self.style.configure(
+            "WarningDay.TButton",
+            background=t["panel"],
+            foreground=t["warning"],
+            bordercolor=t["border"],
+            padding=10,
+        )
+        self.style.configure(
+            "SuccessDay.TButton",
+            background=t["panel"],
+            foreground=t["success"],
+            bordercolor=t["border"],
+            padding=10,
+        )
+
+        self.style.configure(
             "TEntry",
             fieldbackground=t["input_bg"],
             foreground=t["input_fg"],
@@ -485,6 +801,56 @@ class CalendarApp(tk.Tk):
             relief="flat",
         )
 
+        if hasattr(self, "deadline_list"):
+            self.deadline_list.configure(
+                bg=t["input_bg"],
+                fg=t["input_fg"],
+                selectbackground=t["list_select_bg"],
+                selectforeground=t["list_select_fg"],
+                highlightbackground=t["border"],
+                highlightcolor=t["accent"],
+                relief="flat",
+            )
+
+        if hasattr(self, "assignments_list"):
+            self.assignments_list.configure(
+                bg=t["input_bg"],
+                fg=t["input_fg"],
+                selectbackground=t["list_select_bg"],
+                selectforeground=t["list_select_fg"],
+                highlightbackground=t["border"],
+                highlightcolor=t["accent"],
+                relief="flat",
+            )
+
+        if hasattr(self, "due_list"):
+            self.due_list.configure(
+                bg=t["input_bg"],
+                fg=t["input_fg"],
+                selectbackground=t["list_select_bg"],
+                selectforeground=t["list_select_fg"],
+                highlightbackground=t["border"],
+                highlightcolor=t["accent"],
+                relief="flat",
+            )
+
+        if hasattr(self, "legend_canvas_red"):
+            self.legend_canvas_red.configure(bg=t["panel"])
+            self.legend_canvas_yellow.configure(bg=t["panel"])
+            self.legend_canvas_green.configure(bg=t["panel"])
+            self.legend_canvas_red.delete("all")
+            self.legend_canvas_yellow.delete("all")
+            self.legend_canvas_green.delete("all")
+            for canvas, color in (
+                (self.legend_canvas_red, t["danger"]),
+                (self.legend_canvas_yellow, t["warning"]),
+                (self.legend_canvas_green, t["success"]),
+            ):
+                canvas.create_oval(2, 2, 10, 10, fill=color, outline=color)
+
+        self._refresh_sidebar_state()
+        self._refresh_view_content()
+
         self.details_text.configure(
             bg=t["input_bg"],
             fg=t["input_fg"],
@@ -496,9 +862,6 @@ class CalendarApp(tk.Tk):
 
         if hasattr(self, "status_label"):
             self.status_label.configure(bg=t["status_bg"], fg=t["text"])
-
-        if hasattr(self, "theme_button"):
-            self.theme_button.config(text="Light Mode" if self.theme_name == "dark" else "Dark Mode")
 
         if self._due_notice_window is not None and self._due_notice_window.winfo_exists():
             self._due_notice_window.configure(bg=t["bg"])
@@ -517,6 +880,175 @@ class CalendarApp(tk.Tk):
                 fg=t["input_fg"],
                 insertbackground=t["input_fg"],
             )
+
+        self._refresh_legend_dots()
+        self._apply_accessibility_preferences()
+
+    def _get_font_family(self) -> str:
+        """Returns the preferred application font family based on the accessibility setting."""
+        if str(self.font_family_var.get()) == "dyslexic":
+            available = set(tkfont.families(self))
+            for candidate in ("Comic Sans MS", "Verdana", "Arial"):
+                if candidate in available:
+                    return candidate
+        return "Segoe UI"
+
+    def _get_font_size(self) -> int:
+        """Returns the fixed font size in points based on the accessibility setting."""
+        choice = str(self.font_size_var.get()).strip().lower()
+        if choice == "small":
+            return 10
+        if choice == "large":
+            return 14
+        return 12  # Medium (default)
+
+    def _apply_accessibility_preferences(self) -> None:
+        """Applies font family and size preferences across the visible UI using fixed sizes."""
+        family = self._get_font_family()
+        target_size = self._get_font_size()
+        seen: set[int] = set()
+
+        def apply_to_widget(widget: tk.Widget) -> None:
+            widget_id = id(widget)
+            if widget_id in seen:
+                return
+            seen.add(widget_id)
+
+            try:
+                current_font = tkfont.Font(font=widget.cget("font"))
+            except tk.TclError:
+                current_font = None
+
+            if current_font is not None:
+                current_font.configure(family=family, size=target_size)
+                try:
+                    widget.configure(font=current_font)
+                except tk.TclError:
+                    pass
+
+            for child in widget.winfo_children():
+                apply_to_widget(child)
+
+        apply_to_widget(self)
+
+        for style_name in ("TLabel", "Panel.TLabel", "Muted.TLabel", "SidebarTitle.TLabel", "SidebarNav.TLabel"):
+            try:
+                font_spec = self.style.lookup(style_name, "font")
+                if not font_spec:
+                    font_spec = "TkDefaultFont"
+                style_font = tkfont.Font(font=font_spec)
+                style_font.configure(family=family, size=target_size)
+                self.style.configure(style_name, font=style_font)
+            except tk.TclError:
+                pass
+
+        for style_name in (
+            "TButton",
+            "NormalDay.TButton",
+            "SelectedDay.TButton",
+            "OverflowDay.TButton",
+            "LightDangerDay.TButton",
+            "LightWarningDay.TButton",
+            "LightSuccessDay.TButton",
+            "DarkDangerDay.TButton",
+            "DarkWarningDay.TButton",
+            "DarkSuccessDay.TButton",
+            "DangerDay.TButton",
+            "WarningDay.TButton",
+            "SuccessDay.TButton",
+        ):
+            try:
+                font_spec = self.style.lookup(style_name, "font")
+                if not font_spec:
+                    font_spec = "TkDefaultFont"
+                style_font = tkfont.Font(font=font_spec)
+                style_font.configure(family=family, size=target_size)
+                self.style.configure(style_name, font=style_font)
+            except tk.TclError:
+                pass
+
+        self._refresh_day_button_fonts(family)
+
+        self._refresh_legend_dots()
+
+    def _refresh_day_button_fonts(self, family: Optional[str] = None) -> None:
+        """Keeps calendar day buttons compact even when accessibility fonts grow."""
+        if family is None:
+            family = self._get_font_family()
+
+        try:
+            day_font = tkfont.Font(family=family, size=9, weight="bold")
+        except tk.TclError:
+            day_font = tkfont.nametofont("TkDefaultFont")
+            day_font.configure(size=9, weight="bold")
+
+        for style_name in (
+            "NormalDay.TButton",
+            "SelectedDay.TButton",
+            "OverflowDay.TButton",
+            "LightDangerDay.TButton",
+            "LightWarningDay.TButton",
+            "LightSuccessDay.TButton",
+            "DarkDangerDay.TButton",
+            "DarkWarningDay.TButton",
+            "DarkSuccessDay.TButton",
+            "DangerDay.TButton",
+            "WarningDay.TButton",
+            "SuccessDay.TButton",
+        ):
+            try:
+                self.style.configure(style_name, font=day_font)
+            except tk.TclError:
+                pass
+
+    def _on_accessibility_settings_changed(self) -> None:
+        """Normalizes the settings values, applies them, and persists them locally."""
+        size_choice = str(self.font_size_var.get()).strip().title() or "Medium"
+        if size_choice not in {"Small", "Medium", "Large"}:
+            size_choice = "Medium"
+        self.font_size_var.set(size_choice)
+
+        family_mode = str(self.font_family_var.get()).strip().lower()
+        if family_mode not in {"standard", "dyslexic"}:
+            family_mode = "standard"
+        self.font_family_var.set(family_mode)
+
+        self.app_settings["font_family_mode"] = family_mode
+        self.app_settings["font_size"] = size_choice.lower()
+        self.app_settings["color_blind_mode"] = bool(self.color_blind_var.get())
+        self._save_items()
+        self._apply_accessibility_preferences()
+        self._refresh_calendar()
+        self._refresh_view_lists()
+
+    def _reset_accessibility_settings(self) -> None:
+        """Restores the default accessibility configuration."""
+        self.font_family_var.set("standard")
+        self.font_size_var.set("Medium")
+        self.color_blind_var.set(False)
+        self._on_accessibility_settings_changed()
+
+    def _refresh_legend_dots(self) -> None:
+        """Redraws the legend circles so they remain visible in both themes."""
+        if not hasattr(self, "legend_canvas_red"):
+            return
+
+        if self.color_blind_var.get():
+            self.legend_label_red.config(text="⚠️ URGENT")
+            self.legend_label_yellow.config(text="SOON")
+            self.legend_label_green.config(text="LATER")
+        else:
+            self.legend_label_red.config(text="Overdue / <=24h")
+            self.legend_label_yellow.config(text="<=3 days")
+            self.legend_label_green.config(text="Later")
+
+        for canvas, color in (
+            (self.legend_canvas_red, self.theme["danger"]),
+            (self.legend_canvas_yellow, self.theme["warning"]),
+            (self.legend_canvas_green, self.theme["success"]),
+        ):
+            canvas.delete("all")
+            canvas.create_oval(1, 1, 11, 11, fill=color, outline=color)
 
     def _refresh_calendar(self) -> None:
         """Renders the monthly grid showing current month dates with overflow from previous/next months."""
@@ -545,16 +1077,31 @@ class CalendarApp(tk.Tk):
             self._button_dates[idx] = day if is_current_month else None
 
             if is_current_month:
-                count = len(self.items_by_day.get(self._date_key(day), []))
+                day_items = self.items_by_day.get(self._date_key(day), [])
+                count = len(day_items)
                 suffix = f"\n({count})" if count else ""
                 btn.config(text=f"{day.day}{suffix}", state="normal")
-                style_name = "SelectedDay.TButton" if day == self.selected_date else "NormalDay.TButton"
+                urgency = self._day_urgency(day_items, day)
+                if day == self.selected_date and urgency == "none":
+                    style_name = "SelectedDay.TButton"
+                elif urgency == "danger":
+                    style_name = "LightDangerDay.TButton" if self.theme_name == "light" else "DarkDangerDay.TButton"
+                elif urgency == "warning":
+                    style_name = "LightWarningDay.TButton" if self.theme_name == "light" else "DarkWarningDay.TButton"
+                elif urgency == "success":
+                    style_name = "LightSuccessDay.TButton" if self.theme_name == "light" else "DarkSuccessDay.TButton"
+                elif day == self.selected_date:
+                    style_name = "SelectedDay.TButton"
+                else:
+                    style_name = "NormalDay.TButton"
                 btn.config(style=style_name)
             else:
                 btn.config(text=f"{day.day}", state="disabled", style="OverflowDay.TButton")
 
         self._refresh_selected_day_label()
         self._refresh_item_list()
+        self._refresh_dashboard_panels()
+        self._refresh_view_content()
 
     def _select_day_from_button(self, idx: int) -> None:
         """Updates the active date based on the clicked calendar button."""
@@ -565,6 +1112,83 @@ class CalendarApp(tk.Tk):
         self._refresh_calendar()
         self._set_status(f"Selected {self.selected_date.isoformat()}")
 
+    def _set_active_view(self, view_name: str) -> None:
+        """Switches the main workspace between calendar, assignment, deadline, and settings views."""
+        self.active_view = view_name
+        self._refresh_sidebar_state()
+        self._refresh_view_content()
+
+    def _refresh_sidebar_state(self) -> None:
+        """Updates sidebar selection and hover-ready active styling."""
+        if not hasattr(self, "sidebar_buttons"):
+            return
+
+        for view_name, button in self.sidebar_buttons.items():
+            if view_name == self.active_view:
+                button.config(bg=self.theme["sidebar_active"], relief="flat")
+            else:
+                button.config(bg=self.theme["sidebar"], relief="flat")
+
+    def _on_sidebar_hover(self, button: tk.Button, is_hovering: bool) -> None:
+        """Applies a subtle hover treatment to sidebar navigation items."""
+        if button.cget("bg") == self.theme["sidebar_active"]:
+            return
+        button.config(bg=self.theme["sidebar_active"] if is_hovering else self.theme["sidebar"])
+
+    def _refresh_view_content(self) -> None:
+        """Shows the selected workspace and hides the others."""
+        if not hasattr(self, "view_title_label"):
+            return
+
+        is_calendar = self.active_view == "calendar"
+        self.view_title_label.config(
+            text={
+                "calendar": "Calendar",
+                "assignments": "Assignments",
+                "due": "Due Soon",
+                "settings": "Settings",
+            }.get(self.active_view, "Calendar")
+        )
+
+        for widget in (self.nav_frame, self.month_label, self.prev_btn, self.next_btn, self.nav_spacer):
+            if is_calendar:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+        for widget in (self.calendar_grid, self.metrics_frame, self.progress_row):
+            if is_calendar:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+        if hasattr(self, "assignments_view"):
+            self.assignments_view.tkraise()
+            if self.active_view == "assignments":
+                self.assignments_view.grid()
+            else:
+                self.assignments_view.grid_remove()
+
+        if hasattr(self, "due_view"):
+            self.due_view.tkraise()
+            if self.active_view == "due":
+                self.due_view.grid()
+            else:
+                self.due_view.grid_remove()
+
+        if hasattr(self, "settings_view"):
+            self.settings_view.tkraise()
+            if self.active_view == "settings":
+                self.settings_view.grid()
+            else:
+                self.settings_view.grid_remove()
+
+        if is_calendar:
+            self.month_label.tkraise()
+            self.calendar_grid.tkraise()
+
+        self._refresh_view_lists()
+
     def _refresh_selected_day_label(self) -> None:
         """Updates the sidebar header with the currently selected day."""
         self.selected_day_label.config(text=f"Selected Day: {self.selected_date.strftime('%A, %b %d, %Y')}")
@@ -573,10 +1197,145 @@ class CalendarApp(tk.Tk):
         """Rebuilds the listbox with all items for the selected day."""
         self.item_list.delete(0, tk.END)
         day_items = self.items_by_day.get(self._date_key(self.selected_date), [])
-        for item in day_items:
-            time_part = f"[{item.time_label}] " if item.time_label.strip() else ""
-            self.item_list.insert(tk.END, f"{time_part}{item.title}")
+        for idx, item in enumerate(day_items):
+            _, _, color = self._urgency_metadata(item, self.selected_date)
+            self.item_list.insert(tk.END, self._format_item_display(item, self.selected_date))
+            self.item_list.itemconfig(idx, foreground=color)
         self._clear_editor(keep_status=True)
+
+    def _day_urgency(self, day_items: List[CalendarItem], day_value: date) -> str:
+        """Returns the most urgent color key for a day based on all items due on that day."""
+        if not day_items:
+            return "none"
+
+        urgencies = [self._item_urgency(item, day_value) for item in day_items]
+        if "danger" in urgencies:
+            return "danger"
+        if "warning" in urgencies:
+            return "warning"
+        return "success"
+
+    def _item_urgency(self, item: CalendarItem, fallback_day: date) -> str:
+        """Computes urgency using the saved due date and exact due time."""
+        due_dt = self._item_due_datetime(item, fallback_day)
+        if due_dt is None:
+            return "success"
+        delta = due_dt - datetime.now()
+        if delta.total_seconds() <= 24 * 60 * 60:
+            return "danger"
+        if delta.total_seconds() <= 3 * 24 * 60 * 60:
+            return "warning"
+        return "success"
+
+    def _item_due_datetime(self, item: CalendarItem, fallback_day: date) -> Optional[datetime]:
+        """Parses the saved due date/time, falling back to the calendar day for older records."""
+        due_date_text = (item.due_date or fallback_day.isoformat()).strip()
+        due_time_text = (item.due_time or item.time_label or "11:59 PM").strip() or "11:59 PM"
+        try:
+            due_day = date.fromisoformat(due_date_text)
+        except ValueError:
+            try:
+                due_day = fallback_day
+            except ValueError:
+                return None
+
+        time_formats = ["%I:%M %p", "%H:%M"]
+        parsed_time = None
+        for time_format in time_formats:
+            try:
+                parsed_time = datetime.strptime(due_time_text.upper(), time_format).time()
+                break
+            except ValueError:
+                continue
+        if parsed_time is None:
+            return None
+        return datetime.combine(due_day, parsed_time)
+
+    def _parse_due_date(self, value: str) -> date:
+        """Parses MM/DD/YYYY due dates from the editor."""
+        return datetime.strptime(value.strip(), "%m/%d/%Y").date()
+
+    def _parse_due_time(self, value: str) -> str:
+        """Validates the due time editor field and normalizes it to HH:MM AM/PM."""
+        cleaned = value.strip().upper()
+        parsed = datetime.strptime(cleaned, "%I:%M %p")
+        return parsed.strftime("%I:%M %p")
+
+    def _urgency_metadata(self, item: CalendarItem, fallback_day: date) -> Tuple[str, str, str]:
+        """Returns icon, label, and color for the item's urgency state."""
+        urgency = self._item_urgency(item, fallback_day)
+        if urgency == "danger":
+            return "⚠️", "URGENT", self.theme["danger"]
+        if urgency == "warning":
+            return "⏳", "SOON", self.theme["warning"]
+        return "✅", "LATER", self.theme["success"]
+
+    def _format_due_display(self, item: CalendarItem, fallback_day: date) -> str:
+        """Formats an item using the saved due date and due time."""
+        due_dt = self._item_due_datetime(item, fallback_day)
+        if due_dt is None:
+            return item.title.strip()
+        icon, label, _color = self._urgency_metadata(item, fallback_day)
+        if self.color_blind_var.get():
+            prefix = f"{icon} {label}"
+        else:
+            prefix = icon
+        if due_dt.date() == date.today():
+            day_text = f"Today at {due_dt.strftime('%I:%M %p')}"
+        elif due_dt.date() < date.today():
+            day_text = f"Overdue: {due_dt.strftime('%b %d, %Y at %I:%M %p')}"
+        else:
+            day_text = f"Due: {due_dt.strftime('%b %d, %Y at %I:%M %p')}"
+        return f"{prefix} {day_text} - {item.title.strip()}"
+
+    def _format_item_display(self, item: CalendarItem, fallback_day: date) -> str:
+        """Formats one item for listbox display."""
+        return self._format_due_display(item, fallback_day)
+
+    def _iter_sorted_items(self) -> List[Tuple[date, CalendarItem]]:
+        """Returns all stored items sorted by due date, time label, and title."""
+        pairs: List[Tuple[date, CalendarItem]] = []
+        for day_key, items in self.items_by_day.items():
+            try:
+                day_value = date.fromisoformat(day_key)
+            except ValueError:
+                continue
+            for item in items:
+                pairs.append((day_value, item))
+        pairs.sort(key=lambda entry: (entry[0], (entry[1].due_time or entry[1].time_label).lower(), entry[1].title.lower()))
+        return pairs
+
+    def _refresh_dashboard_panels(self) -> None:
+        """Updates sidebar deadline list and compact progress metrics."""
+        all_items = self._iter_sorted_items()
+        today = date.today()
+
+        total_count = len(all_items)
+        due_today_count = sum(1 for day_value, item in all_items if self._item_due_datetime(item, day_value) is not None and self._item_due_datetime(item, day_value).date() == today)
+        completed_count = sum(1 for day_value, item in all_items if self._item_due_datetime(item, day_value) is not None and self._item_due_datetime(item, day_value) < datetime.now())
+
+        self.metric_total_label.config(text=str(total_count))
+        self.metric_due_today_label.config(text=str(due_today_count))
+        self.metric_completed_label.config(text=str(completed_count))
+
+        progress_pct = (completed_count / total_count * 100.0) if total_count else 0.0
+        self.progress_var.set(progress_pct)
+        self.progress_text_label.config(text=f"{int(round(progress_pct))}%")
+
+        self.deadline_list.delete(0, tk.END)
+        overdue_items = [entry for entry in all_items if entry[0] < today][-5:]
+        upcoming_items = [entry for entry in all_items if entry[0] >= today][: max(0, 12 - len(overdue_items))]
+        display_items = overdue_items + upcoming_items
+        if not display_items:
+            self.deadline_list.insert(tk.END, "No upcoming assignments.")
+            self.deadline_list.itemconfig(0, foreground=self.theme["muted"])
+            return
+
+        for idx, (day_value, item) in enumerate(display_items):
+            _, _, color = self._urgency_metadata(item, day_value)
+            due_display = self._format_due_display(item, day_value)
+            self.deadline_list.insert(tk.END, due_display)
+            self.deadline_list.itemconfig(idx, foreground=color)
 
     def _on_item_selected(self, _event: object) -> None:
         """Loads the selected item into the inline editor fields."""
@@ -584,7 +1343,8 @@ class CalendarApp(tk.Tk):
         if selected_item is None:
             return
         self.title_var.set(selected_item.title)
-        self.time_var.set(selected_item.time_label)
+        self.due_date_var.set((selected_item.due_date or self.selected_date.isoformat()).strip())
+        self.time_var.set((selected_item.due_time or selected_item.time_label or "11:59 PM").strip())
         self.details_text.delete("1.0", tk.END)
         self.details_text.insert("1.0", selected_item.details)
         self._refresh_details_links()
@@ -597,15 +1357,33 @@ class CalendarApp(tk.Tk):
             self._set_status("Title is required to add an item.")
             return
 
+        try:
+            due_date = self._parse_due_date(self.due_date_var.get())
+        except ValueError:
+            message = "Enter a valid due date in MM/DD/YYYY format."
+            self._set_status(message)
+            self._show_error(message, "Invalid Due Date")
+            return
+
+        try:
+            due_time = self._parse_due_time(self.time_var.get())
+        except ValueError:
+            message = "Enter a valid due time in HH:MM AM/PM format."
+            self._set_status(message)
+            self._show_error(message, "Invalid Due Time")
+            return
+
         new_item = CalendarItem(
             item_id=self.next_item_id,
             title=title,
+            due_date=due_date.isoformat(),
+            due_time=due_time,
             details=self.details_text.get("1.0", tk.END).strip(),
-            time_label=self.time_var.get().strip(),
+            time_label=due_time,
         )
         self.next_item_id += 1
 
-        key = self._date_key(self.selected_date)
+        key = self._date_key(due_date)
         self.items_by_day.setdefault(key, []).append(new_item)
         self._save_items()
         self._refresh_calendar()
@@ -624,15 +1402,42 @@ class CalendarApp(tk.Tk):
             self._set_status("Title is required to update an item.")
             return
 
+        try:
+            due_date = self._parse_due_date(self.due_date_var.get())
+        except ValueError:
+            message = "Enter a valid due date in MM/DD/YYYY format."
+            self._set_status(message)
+            self._show_error(message, "Invalid Due Date")
+            return
+
+        try:
+            due_time = self._parse_due_time(self.time_var.get())
+        except ValueError:
+            message = "Enter a valid due time in HH:MM AM/PM format."
+            self._set_status(message)
+            self._show_error(message, "Invalid Due Time")
+            return
+
         key = self._date_key(self.selected_date)
         items = self.items_by_day.get(key, [])
         if not (0 <= selected_index < len(items)):
             self._set_status("Selected item is no longer available.")
             return
 
-        items[selected_index].title = title
-        items[selected_index].time_label = self.time_var.get().strip()
-        items[selected_index].details = self.details_text.get("1.0", tk.END).strip()
+        updated_item = items.pop(selected_index)
+        if not items:
+            self.items_by_day.pop(key, None)
+
+        updated_item.title = title
+        updated_item.due_date = due_date.isoformat()
+        updated_item.due_time = due_time
+        updated_item.time_label = due_time
+        updated_item.details = self.details_text.get("1.0", tk.END).strip()
+
+        target_key = self._date_key(due_date)
+        self.items_by_day.setdefault(target_key, []).append(updated_item)
+        if target_key != key:
+            self.selected_date = due_date
 
         self._save_items()
         self._refresh_calendar()
@@ -666,7 +1471,8 @@ class CalendarApp(tk.Tk):
         """Clears editor fields so the user can enter a new item quickly."""
         self.item_list.selection_clear(0, tk.END)
         self.title_var.set("")
-        self.time_var.set("")
+        self.due_date_var.set(self.selected_date.strftime("%m/%d/%Y"))
+        self.time_var.set("11:59 PM")
         self.details_text.delete("1.0", tk.END)
         self._refresh_details_links()
         if not keep_status:
@@ -945,8 +1751,10 @@ class CalendarApp(tk.Tk):
                 CalendarItem(
                     item_id=self.next_item_id,
                     title=title,
+                    due_date=date_key,
+                    due_time=event.time_label.strip() or "11:59 PM",
                     details=details_text,
-                    time_label=event.time_label.strip(),
+                    time_label=event.time_label.strip() or "11:59 PM",
                 )
             )
             self.next_item_id += 1
@@ -1291,14 +2099,16 @@ class CalendarApp(tk.Tk):
                 day_value = date.fromisoformat(day_key)
             except ValueError:
                 continue
-            if day_value < today:
-                continue
             upcoming_by_day[day_value] = list(items)
 
         if not upcoming_by_day:
             return "No upcoming due dates from today onward.", None, 0
 
-        first_due_date = min(upcoming_by_day)
+        future_days = [day_value for day_value in upcoming_by_day if any(self._item_due_datetime(item, day_value) is not None and self._item_due_datetime(item, day_value).date() >= today for item in upcoming_by_day[day_value])]
+        if not future_days:
+            return "No upcoming due dates from today onward.", None, 0
+
+        first_due_date = min(future_days)
         window_end = first_due_date + timedelta(days=3)
         window_dates = sorted(day_value for day_value in upcoming_by_day if first_due_date <= day_value <= window_end)
         window_item_count = sum(len(upcoming_by_day[day_value]) for day_value in window_dates)
@@ -1311,15 +2121,18 @@ class CalendarApp(tk.Tk):
             day_items = sorted(
                 upcoming_by_day[day_value],
                 key=lambda item: (
-                    item.time_label.strip().lower(),
+                    (item.due_time or item.time_label).strip().lower(),
                     item.title.strip().lower(),
                 ),
             )
             day_label = day_value.strftime("%a, %b %d")
             lines.append(f"{day_label} ({len(day_items)} item{'s' if len(day_items) != 1 else ''})")
             for item in day_items:
-                time_prefix = f"[{item.time_label}] " if item.time_label.strip() else ""
-                lines.append(f"- {time_prefix}{item.title}")
+                due_dt = self._item_due_datetime(item, day_value)
+                if due_dt is None:
+                    lines.append(f"- {item.title}")
+                else:
+                    lines.append(f"- Due: {due_dt.strftime('%b %d, %Y at %I:%M %p')} - {item.title}")
 
         return "\n".join(lines), first_due_date, window_item_count
 
@@ -1440,6 +2253,29 @@ class CalendarApp(tk.Tk):
         self._error_window.deiconify()
         self._error_window.lift()
 
+    def _refresh_view_lists(self) -> None:
+        """Updates the assignment and due-soon list views for the selected sidebar mode."""
+        if not hasattr(self, "assignments_list"):
+            return
+
+        rows = self._iter_sorted_items()
+
+        self.assignments_list.delete(0, tk.END)
+        for idx, (day_value, item) in enumerate(rows):
+            _, _, color = self._urgency_metadata(item, day_value)
+            self.assignments_list.insert(tk.END, self._format_due_display(item, day_value))
+            self.assignments_list.itemconfig(idx, foreground=color)
+
+        self.due_list.delete(0, tk.END)
+        urgent_rows = [entry for entry in rows if self._item_urgency(entry[1], entry[0]) in {"danger", "warning"}]
+        if not urgent_rows:
+            self.due_list.insert(tk.END, "No urgent deadlines right now.")
+        else:
+            for idx, (day_value, item) in enumerate(urgent_rows):
+                _, _, color = self._urgency_metadata(item, day_value)
+                self.due_list.insert(tk.END, self._format_due_display(item, day_value))
+                self.due_list.itemconfig(idx, foreground=color)
+
     def _close_error_window(self) -> None:
         """Destroys the error window so users can continue with the main interface."""
         if self._error_window is not None and self._error_window.winfo_exists():
@@ -1463,6 +2299,8 @@ class CalendarApp(tk.Tk):
             self._show_error(message, "Data File Error")
             return
 
+        self._load_app_settings(payload.get("settings", {}))
+
         loaded_map = payload.get("items_by_day", {})
         next_id = int(payload.get("next_item_id", 1))
         parsed_map: Dict[str, List[CalendarItem]] = {}
@@ -1473,7 +2311,14 @@ class CalendarApp(tk.Tk):
             for raw in raw_items:
                 if not isinstance(raw, dict) or "title" not in raw or "item_id" not in raw:
                     continue
-                parsed_items.append(CalendarItem.from_dict(raw))
+                parsed_item = CalendarItem.from_dict(raw)
+                if not parsed_item.due_date:
+                    parsed_item.due_date = str(key)
+                if not parsed_item.due_time:
+                    parsed_item.due_time = parsed_item.time_label.strip() or "11:59 PM"
+                if not parsed_item.time_label:
+                    parsed_item.time_label = parsed_item.due_time
+                parsed_items.append(parsed_item)
             if parsed_items:
                 parsed_map[str(key)] = parsed_items
 
@@ -1484,6 +2329,25 @@ class CalendarApp(tk.Tk):
         )
         self.next_item_id = max(next_id, max_seen_id + 1)
 
+    def _load_app_settings(self, payload: object) -> None:
+        """Restores persisted accessibility settings from the data file."""
+        settings = dict(DEFAULT_APP_SETTINGS)
+        if isinstance(payload, dict):
+            family_mode = str(payload.get("font_family_mode", DEFAULT_APP_SETTINGS["font_family_mode"]))
+            if family_mode in {"standard", "dyslexic"}:
+                settings["font_family_mode"] = family_mode
+
+            font_size = str(payload.get("font_size", DEFAULT_APP_SETTINGS["font_size"]))
+            if font_size in {"small", "medium", "large"}:
+                settings["font_size"] = font_size
+
+            settings["color_blind_mode"] = bool(payload.get("color_blind_mode", DEFAULT_APP_SETTINGS["color_blind_mode"]))
+
+        self.app_settings = settings
+        self.font_family_var.set(str(settings["font_family_mode"]))
+        self.font_size_var.set(str(settings["font_size"]).title())
+        self.color_blind_var.set(bool(settings["color_blind_mode"]))
+
     def _save_items(self) -> None:
         """Persists all calendar items to the active JSON data file."""
         serializable_map = {
@@ -1493,6 +2357,11 @@ class CalendarApp(tk.Tk):
         payload = {
             "next_item_id": self.next_item_id,
             "items_by_day": serializable_map,
+            "settings": {
+                "font_family_mode": self.font_family_var.get(),
+                "font_size": str(self.font_size_var.get()).strip().lower(),
+                "color_blind_mode": bool(self.color_blind_var.get()),
+            },
         }
         try:
             DATA_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
